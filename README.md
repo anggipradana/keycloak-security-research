@@ -18,8 +18,8 @@ Manual security assessment of Keycloak 26.5.4 (latest stable) targeting the offi
 | 1 | [CORS OPTIONS Preflight Bypass — webOrigins Not Enforced for Preflight](#finding-1) | **MEDIUM** | 5.3 |
 | 2 | [alg:none JWT causes HTTP 500 (NullPointerException)](#finding-2) | **MEDIUM** | 5.3 |
 | 3 | [Offline Token Persistence After Admin Session Revocation](#finding-3) | **HIGH** | 7.5 |
-| 4 | [SSRF via Identity Provider import-config Endpoint](#finding-4) | **MEDIUM** | 6.5 |
-| 5 | [DCR Bypass: Authenticated Users Register Clients with Arbitrary redirect_uri → Auth Code Theft](#finding-5) | **HIGH** | 8.0 |
+| 4 | [SSRF + Open Redirect via Identity Provider — Credential Phishing via kc_idp_hint](#finding-4) | **HIGH** | 8.0 |
+| 5 | [DCR Bypass: create-client Users Bypass Trusted Hosts → Arbitrary redirect_uri → Auth Code Theft](#finding-5) | **HIGH** | 8.0 |
 | 6 | [SSRF via DCR jwks_uri — Low-Privilege Internal Network Probing](#finding-6) | **MEDIUM** | 6.5 |
 
 ---
@@ -112,24 +112,23 @@ See: [`pocs/poc4_offline_token_persistence.sh`](pocs/poc4_offline_token_persiste
 
 ---
 
-## Finding #4 — SSRF via IdP import-config {#finding-4}
+## Finding #4 — SSRF + Open Redirect via IdP {#finding-4}
 
-**Type:** Server-Side Request Forgery
-**Affected:** `POST /admin/realms/{realm}/identity-provider/import-config`
-**Required role:** `manage-identity-providers` (realm admin level)
+**Type:** Server-Side Request Forgery + Open Redirect / Credential Phishing
+**Affected:** `POST /admin/realms/{realm}/identity-provider/import-config` (SSRF) + `/realms/{realm}/protocol/openid-connect/auth?kc_idp_hint=` (open redirect)
+**Required role:** `manage-identity-providers` (for IdP creation; phishing link requires no additional role)
 
-The `fromUrl` parameter causes Keycloak to make an outbound HTTP request to any specified URL — including internal network addresses. This enables internal port scanning and internal service access for any user with the `manage-identity-providers` realm role.
+Two attack chains via the IdP subsystem:
 
-**Quick reproduction:**
-```bash
-# Start listener: python3 -m http.server 9999 --bind 127.0.0.1
+**Path A — SSRF:** The `fromUrl` parameter causes Keycloak to make an outbound HTTP request to any specified URL — including internal network addresses.
 
-curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"providerId":"oidc","fromUrl":"http://127.0.0.1:9999/.well-known/openid-configuration"}' \
-  "http://<KC_HOST>/admin/realms/test/identity-provider/import-config"
+**Path B — Open Redirect/Phishing (UPGRADED):** After registering an IdP with `authorizationUrl: https://evil.com/auth`, any victim who clicks a URL with `kc_idp_hint=attacker-idp` is **immediately HTTP 303 redirected to evil.com** via Keycloak's broker mechanism. The initial URL is on the legitimate Keycloak domain — bypassing URL filters and user vigilance.
 
-# Listener receives: "GET /.well-known/openid-configuration HTTP/1.1"
+**Confirmed redirect chain:**
+```
+GET /realms/test/protocol/openid-connect/auth?client_id=webapp&kc_idp_hint=attacker-idp&...
+→ HTTP 303 → /realms/test/broker/attacker-idp/login?session_code=...
+→ HTTP 303 → https://evil.com/auth?scope=openid+email+profile&state=...&client_id=attacker-client
 ```
 
 See: [`pocs/poc5_ssrf_idp_import.sh`](pocs/poc5_ssrf_idp_import.sh)
@@ -140,13 +139,15 @@ See: [`pocs/poc5_ssrf_idp_import.sh`](pocs/poc5_ssrf_idp_import.sh)
 
 **Type:** Broken Access Control — DCR Trusted Hosts policy bypass
 **Affected:** `POST /realms/{realm}/clients-registrations/openid-connect`
-**Required privilege:** Any authenticated realm user
+**Required privilege:** `create-client` realm-management role (delegated developer privilege)
 
-Any authenticated realm user can register OIDC clients with **arbitrary redirect URIs** via Dynamic Client Registration. The "Trusted Hosts" DCR policy is configured only for the `anonymous` subType — the `authenticated` subType has no host/URI restriction. Registered clients are **immediately active** (no admin approval), allowing complete auth code interception of any realm user.
+Users with the `create-client` realm-management role can register OIDC clients with **arbitrary redirect URIs** via Dynamic Client Registration. The "Trusted Hosts" DCR policy is configured only for the `anonymous` subType — the `authenticated` subType has no host/URI restriction. Registered clients are **immediately active** (no admin approval), allowing complete auth code interception of any realm user.
+
+**Verified privilege boundary:** `create-client` users CANNOT create clients via admin REST API (HTTP 403), but CAN bypass all URI restrictions via authenticated DCR — confirming this is a policy enforcement gap specific to the DCR path.
 
 **Quick reproduction:**
 ```bash
-# 1. Attacker gets any user token
+# 1. Attacker gets token as user with create-client realm-management role
 ATTACKER_TOKEN=$(curl -s -X POST http://<KC_HOST>/realms/test/protocol/openid-connect/token \
   -d "client_id=webapp&grant_type=password&username=testuser&password=Password123&scope=openid" \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")

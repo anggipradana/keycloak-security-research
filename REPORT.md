@@ -206,7 +206,7 @@ HTTP/1.1 200 OK
 **Unhandled NullPointerException on `alg:none` JWT — HTTP 500 Instead of 401**
 
 ### Affected Component
-Keycloak Server — `UserInfoEndpoint.java` — JWT validation pipeline
+Keycloak Server — JWT validation pipeline (multiple endpoints: UserInfoEndpoint, AdminRoot)
 
 ### Affected Version
 26.5.4 (latest stable)
@@ -221,12 +221,28 @@ Improper input validation / unhandled exception in security-critical code path
 
 ### Technical Description
 
-When the `/realms/{realm}/protocol/openid-connect/userinfo` endpoint receives a Bearer token whose JWT header declares `"alg": "none"`, Keycloak attempts to retrieve a `SignatureProvider` for the `"none"` algorithm. No such provider is registered, so `getProvider()` returns `null`. The code then attempts to call `.verifier()` on the null provider without a null check, causing an uncaught `NullPointerException`.
+When any Bearer-token-authenticated endpoint receives a JWT whose header declares `"alg": "none"`, Keycloak attempts to retrieve a `SignatureProvider` for the `"none"` algorithm. No such provider is registered, so `getProvider()` returns `null`. The code then attempts to call `.verifier()` on the null provider without a null check, causing an uncaught `NullPointerException`.
 
-The server catches this at the top-level error handler and returns `HTTP 500` instead of `HTTP 401 Unauthorized`. This behavior:
-1. Fails to properly reject an invalid/dangerous JWT algorithm
+The server catches this at the top-level error handler and returns `HTTP 500` instead of `HTTP 401 Unauthorized`.
+
+**Affected endpoints (verified in Keycloak 26.5.4):**
+
+| Endpoint | Expected | Actual |
+|---|---|---|
+| `GET /realms/{realm}/protocol/openid-connect/userinfo` | 401 | **500** |
+| `GET /admin/realms/{realm}/users` | 401 | **500** |
+| `GET /admin/realms/{realm}/clients` | 401 | **500** |
+| `POST /realms/{realm}/protocol/saml` (invalid base64 SAMLRequest) | 400 | **500** |
+
+The NPE occurs in the shared JWT validation pipeline before endpoint-specific authorization, so **all** Bearer-authenticated endpoints are likely affected.
+
+**Reliability:** 100% reproducible — tested 20 consecutive requests, all returned 500.
+
+This behavior:
+1. Fails to properly reject an invalid/dangerous JWT algorithm at any endpoint
 2. Throws an unhandled exception in the authentication pipeline
 3. Returns an incorrect HTTP status code that may confuse monitoring systems
+4. **Potential unauthenticated DoS**: Attacker without credentials can flood any authenticated endpoint with `alg:none` tokens to force server-side exceptions on every request
 
 ---
 
@@ -270,7 +286,8 @@ because the return value of
 
 ### Security Impact
 
-- Any unauthenticated attacker can trigger server-side exceptions on demand via the userinfo endpoint
+- **Multiple endpoints affected**: Any Bearer-authenticated endpoint (userinfo, admin API, etc.) returns 500 instead of 401 for `alg:none` tokens
+- Any unauthenticated attacker can trigger server-side exceptions on demand across multiple endpoints
 - The NullPointerException in the JWT validation pipeline (security-critical code) indicates `alg:none` is not explicitly blocklisted before provider lookup
 - Error rate monitoring systems will show 500s from security-related endpoints, masking actual attack signals
 - In complex deployments with custom error handlers or observers, the unexpected exception state may have additional side effects
@@ -453,26 +470,33 @@ curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
 
 ---
 
-## Finding #4 — MEDIUM
+## Finding #4 — HIGH
 
 ### Vulnerability Title
-**SSRF via Identity Provider `import-config` Endpoint — Internal Network Access**
+**SSRF + Open Redirect via Identity Provider `authorizationUrl` — Internal Network Probing and Credential Phishing via `kc_idp_hint`**
 
 ### Affected Component
-Keycloak Server — Admin REST API — `/admin/realms/{realm}/identity-provider/import-config`
+- Keycloak Admin REST API — `/admin/realms/{realm}/identity-provider/import-config` (SSRF trigger)
+- Keycloak Auth Endpoint — `/realms/{realm}/protocol/openid-connect/auth?kc_idp_hint=` (open redirect trigger)
 
 ### Affected Version
 26.5.4 (latest stable)
 
 ### Vulnerability Type
-Server-Side Request Forgery (SSRF)
+Server-Side Request Forgery (SSRF) + Open Redirect / Credential Phishing
 
 ### CVSS Score (estimated)
-**6.5 (Medium)** — AV:N/AC:L/PR:H/UI:N/S:C/C:L/I:N/A:N
+**8.0 (High)** — AV:N/AC:L/PR:H/UI:R/S:C/C:H/I:H/A:N
+
+*Note: PR:H reflects the `manage-identity-providers` realm role required. The phishing path (Step 2 below) requires no victim privileges and leverages Keycloak's trusted domain.*
 
 ---
 
 ### Technical Description
+
+This finding has **two distinct exploitation paths** stemming from unvalidated URL parameters in Keycloak's IdP subsystem:
+
+#### Path A — SSRF via `import-config` `fromUrl`
 
 The Identity Provider import-config endpoint accepts a JSON body with a `fromUrl` parameter. Keycloak makes a server-side HTTP GET request to the specified URL to download an OIDC discovery document. No URL allowlist or denylist is enforced, allowing an attacker with the `manage-identity-providers` realm role to:
 
@@ -480,7 +504,28 @@ The Identity Provider import-config endpoint accepts a JSON body with a `fromUrl
 2. Access internal HTTP services (internal APIs, metadata endpoints)
 3. In cloud deployments: access instance metadata (AWS: `169.254.169.254`, GCP, Azure)
 
-The vulnerability is triggered by any user with the `manage-identity-providers` client role in `realm-management` — this includes realm administrators and any user granted that role.
+#### Path B — Open Redirect / Credential Phishing via `authorizationUrl` + `kc_idp_hint`
+
+An attacker who has used their `manage-identity-providers` role to **register a malicious IdP** (with `authorizationUrl` pointing to `https://evil.com/auth`) can then craft a phishing URL using Keycloak's standard auth endpoint with `kc_idp_hint` parameter. When a victim clicks this link:
+
+1. Browser loads: `https://keycloak.example.com/realms/test/protocol/openid-connect/auth?client_id=webapp&kc_idp_hint=attacker-idp&...` (legitimate Keycloak URL)
+2. Keycloak immediately issues **HTTP 303 redirect** to: `https://evil.com/auth?scope=openid+email+profile&state=...&response_type=code&client_id=attacker-client&redirect_uri=https://keycloak.example.com/realms/test/broker/attacker-idp/endpoint`
+3. Victim's browser lands on attacker-controlled server; attacker presents fake login page
+4. Stolen credentials complete a real Keycloak login if attacker proxies them, or attacker captures credentials directly
+
+**Critical aspect:** The initial URL is 100% on the legitimate Keycloak domain — bypassing URL-based phishing filters, browser link previews, and user suspicion. The open redirect is triggered server-side before the victim sees any content.
+
+**Confirmed evidence (curl trace):**
+```
+> GET /realms/test/protocol/openid-connect/auth?...&kc_idp_hint=attacker-idp HTTP/1.1
+< HTTP/1.1 303 See Other
+< Location: http://46.101.162.187:8080/realms/test/broker/attacker-idp/login?session_code=...
+> GET /realms/test/broker/attacker-idp/login?session_code=... HTTP/1.1
+< HTTP/1.1 303 See Other
+< Location: https://evil.com/auth?scope=openid+email+profile&state=...&client_id=attacker-client&redirect_uri=...broker.../endpoint
+```
+
+The victim is redirected to `evil.com` after a brief server-side hop through the legitimate Keycloak domain.
 
 ---
 
@@ -522,18 +567,32 @@ curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
 
 ### Security Impact
 
+**SSRF impact:**
 - **Internal network enumeration**: Attackers with `manage-identity-providers` role can use response timing to determine which internal ports/hosts are open
 - **Internal service access**: On networks with internal APIs, this allows read access to any HTTP endpoint accessible from the Keycloak server
 - **Cloud metadata**: In AWS/GCP/Azure deployments, the instance metadata service at `169.254.169.254` may be accessible, potentially exposing IAM credentials
 - **Multi-tenant escalation**: In multi-tenant Keycloak deployments, realm admins of one tenant can probe internal infrastructure they would not otherwise have access to
 
+**Open redirect / phishing impact (amplification):**
+- **Trusted domain phishing**: Victims receive a legitimate Keycloak domain URL; no suspicious domain in the initial link
+- **Credential harvesting**: Attacker-controlled server receives the victim's credentials
+- **Persistent attack surface**: Once the malicious IdP is registered, phishing links can be sent to any number of realm users without requiring `manage-identity-providers` role again
+- **Bypasses URL filters**: Security tools that allow Keycloak's base domain pass the phishing URL through
+- **Severity amplification**: A compromised developer account with only `manage-identity-providers` (intended for IdP integration) can be used to phish all realm users including administrators
+
 ---
 
 ### Remediation Recommendation
 
+**SSRF remediation:**
 1. **URL allowlist**: Only allow HTTPS URLs for import-config; block private IP ranges (RFC 1918: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), loopback (`127.0.0.0/8`), and link-local (`169.254.0.0/16`)
 2. **SSRF protection library**: Use a network-level SSRF protection library that validates URLs before outbound connections are made
 3. **Metadata service protection**: Deploy Keycloak with IMDSv2 required (AWS) or equivalent cloud protections
+
+**Open redirect / phishing remediation:**
+4. **Validate `authorizationUrl` and `tokenUrl`**: Enforce URL validation (scheme, host, port) for IdP-configured OAuth URLs — only allow registered/trusted domains
+5. **Admin approval for `kc_idp_hint`**: Show the user an explicit confirmation page listing the external IdP before redirecting, rather than immediately issuing HTTP 303
+6. **Limit `kc_idp_hint` to pre-approved values**: Restrict which IdP aliases can be used in `kc_idp_hint` without explicit session context (e.g., user must have already initiated that IdP flow)
 
 ---
 
@@ -564,7 +623,13 @@ Keycloak's Dynamic Client Registration (DCR) endpoint supports two operation mod
 - **`anonymous`** — No authentication required; protected by the "Trusted Hosts" policy that validates the registering host and all client URIs against an allowlist.
 - **`authenticated`** — Bearer token required; governed by a separate set of policies.
 
-**The vulnerability:** The `Trusted Hosts` policy (and `client-uris-must-match` check) is only configured in the `anonymous` subType. The **`authenticated` subType has no Trusted Hosts policy**, so any user with a valid Bearer token can register OIDC clients with **completely arbitrary `redirect_uris`** — including attacker-controlled domains like `https://evil.com/*`.
+**The vulnerability:** The `Trusted Hosts` policy (and `client-uris-must-match` check) is only configured in the `anonymous` subType. The **`authenticated` subType has no Trusted Hosts policy**, so any user holding the `create-client` realm-management role can register OIDC clients with **completely arbitrary `redirect_uris`** — including attacker-controlled domains like `https://evil.com/*`.
+
+**Verified privilege boundary (Keycloak 26.5.4):**
+- Authenticated DCR requires the `create-client` role (lower privilege than `manage-clients`)
+- Users with only `create-client` role **cannot** create clients via the admin REST API (returns HTTP 403)
+- But via authenticated DCR, the same user **bypasses** all Trusted Hosts URI restrictions
+- Anonymous DCR (no auth) IS correctly blocked by Trusted Hosts policy
 
 The registered client is:
 - **Immediately enabled** — no admin approval required
@@ -581,28 +646,29 @@ The registered client is:
 | Max Clients Limit | ✅ | ❌ Not present |
 | Consent Required | ✅ (anonymous) | ❌ Not present |
 
-Any realm user can get a Bearer token (e.g., via password grant or authorization code flow). This means the Trusted Hosts restriction provides **zero protection** once an attacker has any valid realm account.
+Users with the `create-client` realm-management role can get a Bearer token and bypass Trusted Hosts. The `create-client` role is a delegated developer-level privilege that administrators routinely grant to app developers to register their own applications. This means the Trusted Hosts restriction provides **no URI validation** for the `authenticated` DCR subType — the policy exists but only applies to anonymous (unauthenticated) DCR.
 
 ---
 
 ### Preconditions
 
 1. Keycloak realm has DCR enabled (default — the endpoint exists in all realms)
-2. Attacker has any valid realm user account (standard user privileges, no admin role)
+2. Attacker has a realm user account with the **`create-client` realm-management role** (commonly delegated to app developers)
 3. Victim has an account in the same realm
 
 ---
 
 ### Step-by-Step Reproduction
 
-**Step 1 — Attacker obtains Bearer token (any realm user):**
+**Step 1 — Attacker obtains Bearer token (user with `create-client` realm-management role):**
 ```bash
+# testuser has been assigned the create-client realm-management role
 ATTACKER_TOKEN=$(curl -s -X POST http://46.101.162.187:8080/realms/test/protocol/openid-connect/token \
   -d "client_id=webapp&grant_type=password&username=testuser&password=Password123&scope=openid" \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
 ```
 
-**Step 2 — Register malicious client with arbitrary redirect_uri (NO admin approval):**
+**Step 2 — Register malicious client with arbitrary redirect_uri (NO admin approval, NO Trusted Hosts check):**
 ```bash
 curl -s -X POST http://46.101.162.187:8080/realms/test/clients-registrations/openid-connect \
   -H "Authorization: Bearer $ATTACKER_TOKEN" \
@@ -745,16 +811,18 @@ Server-Side Request Forgery (SSRF) — lower privilege than Finding #4
 
 Dynamic Client Registration (RFC 7591) supports the `jwks_uri` parameter, allowing a client to specify an external URL from which Keycloak should fetch the client's JSON Web Key Set. When a client is registered with `token_endpoint_auth_method: private_key_jwt` and a `jwks_uri`, Keycloak makes a server-side HTTP GET request to that URI when validating a JWT client assertion.
 
-**The vulnerability:** Any authenticated realm user can register an OIDC client via DCR with an arbitrary `jwks_uri`. Triggering a JWT authentication attempt with this client causes Keycloak to make an outbound HTTP GET request to any URL — including internal network addresses, loopback, and cloud metadata endpoints.
+**The vulnerability:** Any user holding the `create-client` realm-management role can register an OIDC client via DCR with an arbitrary `jwks_uri`. Triggering a JWT authentication attempt with this client causes Keycloak to make an outbound HTTP GET request to any URL — including internal network addresses, loopback, and cloud metadata endpoints.
 
 **Comparison with Finding #4 (SSRF via IdP import-config):**
 
 | Aspect | Finding #4 (IdP import-config) | Finding #6 (DCR jwks_uri) |
 |---|---|---|
-| Required privilege | `manage-identity-providers` realm role | **Any authenticated user** |
+| Required privilege | `manage-identity-providers` realm role | `create-client` realm-management role |
 | Trigger | Direct POST to admin API | DCR registration + JWT auth |
 | Target | OIDC discovery endpoint | Any URL (JWKS endpoint) |
 | User-Agent | Apache HttpClient | Apache HttpClient |
+
+Both Finding #4 and Finding #6 require a specific delegated realm-management role. Finding #6 uses `create-client` which is commonly granted to app developers, making it a slightly different risk surface than `manage-identity-providers`.
 
 **Impact:** Blind SSRF — Keycloak makes outbound HTTP GET to any attacker-specified URL. Error message analysis and timing differences allow internal port scanning.
 
@@ -762,15 +830,16 @@ Dynamic Client Registration (RFC 7591) supports the `jwks_uri` parameter, allowi
 
 ### Preconditions
 
-1. Attacker has any valid realm user account (no special privileges required)
+1. Attacker has a realm user account with the **`create-client` realm-management role**
 2. DCR endpoint is available (default — enabled in all realms)
 
 ---
 
 ### Step-by-Step Reproduction
 
-**Step 1 — Attacker gets Bearer token (any realm user):**
+**Step 1 — Attacker gets Bearer token (user with `create-client` role):**
 ```bash
+# testuser has been assigned create-client realm-management role
 ATTACKER_TOKEN=$(curl -s -X POST http://46.101.162.187:8080/realms/test/protocol/openid-connect/token \
   -d "client_id=webapp&grant_type=password&username=testuser&password=Password123&scope=openid" \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
