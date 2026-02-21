@@ -20,6 +20,7 @@ Manual security assessment of Keycloak 26.5.4 (latest stable) targeting the offi
 | 3 | [Offline Token Persistence After Admin Session Revocation](#finding-3) | **HIGH** | 7.5 |
 | 4 | [SSRF via Identity Provider import-config Endpoint](#finding-4) | **MEDIUM** | 6.5 |
 | 5 | [DCR Bypass: Authenticated Users Register Clients with Arbitrary redirect_uri → Auth Code Theft](#finding-5) | **HIGH** | 8.0 |
+| 6 | [SSRF via DCR jwks_uri — Low-Privilege Internal Network Probing](#finding-6) | **MEDIUM** | 6.5 |
 
 ---
 
@@ -176,6 +177,7 @@ See: [`pocs/poc6_dcr_client_hijack.sh`](pocs/poc6_dcr_client_hijack.sh)
 | [`pocs/poc4_offline_token_persistence.sh`](pocs/poc4_offline_token_persistence.sh) | Shell PoC — offline token survives admin revocation |
 | [`pocs/poc5_ssrf_idp_import.sh`](pocs/poc5_ssrf_idp_import.sh) | Shell PoC — SSRF via IdP import-config |
 | [`pocs/poc6_dcr_client_hijack.sh`](pocs/poc6_dcr_client_hijack.sh) | Shell PoC — DCR bypass → victim auth code theft |
+| [`pocs/poc7_dcr_jwks_ssrf.sh`](pocs/poc7_dcr_jwks_ssrf.sh) | Shell PoC — SSRF via DCR jwks_uri (low-privilege) |
 
 ## Full Report
 
