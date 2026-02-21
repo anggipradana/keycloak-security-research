@@ -49,6 +49,7 @@ POCS = [
         "finding": "Finding #5",
         "title": "DCR Trusted Hosts Bypass",
         "severity": "HIGH",
+        "extra_args": ["--auto-victim", "--timeout", "30"],
     },
     {
         "file": "poc_f6_dcr_jwks_ssrf.py",
@@ -71,13 +72,15 @@ def banner():
 ╚══════════════════════════════════════════════════════════════════╝{RESET}
 """)
 
-def run_poc(poc_dir, poc_file, host, timeout=120):
+def run_poc(poc_dir, poc_file, host, timeout=120, extra_args=None):
     """Run a single PoC script and return (exit_code, duration, output)."""
     script = os.path.join(poc_dir, poc_file)
     if not os.path.exists(script):
         return -1, 0.0, f"File not found: {script}"
 
     cmd = [sys.executable, script, "--host", host]
+    if extra_args:
+        cmd.extend(extra_args)
     start = time.time()
     try:
         result = subprocess.run(
@@ -140,7 +143,8 @@ def main():
         print(f"{BOLD}{'━' * 70}{RESET}")
         print()
 
-        exit_code, duration, output = run_poc(poc_dir, poc["file"], args.host, args.timeout)
+        exit_code, duration, output = run_poc(poc_dir, poc["file"], args.host, args.timeout,
+                                             extra_args=poc.get("extra_args"))
 
         if not args.quiet:
             # Print output with slight indent
