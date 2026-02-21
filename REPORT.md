@@ -506,6 +506,8 @@ The Identity Provider import-config endpoint accepts a JSON body with a `fromUrl
 
 #### Path B — Open Redirect / Credential Phishing via `authorizationUrl` + `kc_idp_hint`
 
+*(See also Path C below — SSRF via tokenUrl, which complements Path B by adding server-side POST requests to internal services.)*
+
 An attacker who has used their `manage-identity-providers` role to **register a malicious IdP** (with `authorizationUrl` pointing to `https://evil.com/auth`) can then craft a phishing URL using Keycloak's standard auth endpoint with `kc_idp_hint` parameter. When a victim clicks this link:
 
 1. Browser loads: `https://keycloak.example.com/realms/test/protocol/openid-connect/auth?client_id=webapp&kc_idp_hint=attacker-idp&...` (legitimate Keycloak URL)
@@ -579,6 +581,35 @@ curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
 - **Persistent attack surface**: Once the malicious IdP is registered, phishing links can be sent to any number of realm users without requiring `manage-identity-providers` role again
 - **Bypasses URL filters**: Security tools that allow Keycloak's base domain pass the phishing URL through
 - **Severity amplification**: A compromised developer account with only `manage-identity-providers` (intended for IdP integration) can be used to phish all realm users including administrators
+
+**Path C — SSRF via `tokenUrl` (Broker Callback POST) — CONFIRMED:**
+
+When a victim clicks a phishing link using `kc_idp_hint` and the attacker's server returns a fake auth code, Keycloak's broker makes a **server-side HTTP POST** to the configured `tokenUrl` to exchange the code. This means:
+1. The `tokenUrl` can point to any internal address
+2. Keycloak POSTs `authorization_code&redirect_uri&client_id&client_secret` to the internal service
+3. This is a POST-capable SSRF (stronger than the GET-only `fromUrl` SSRF)
+
+**Evidence from HTTP listener:**
+```
+Listening on 0.0.0.0 49992
+Connection received on 127.0.0.1 35308
+POST /token HTTP/1.1
+Content-Length: 196
+Content-Type: application/x-www-form-urlencoded
+Host: 127.0.0.1:49992
+User-Agent: Apache-HttpClient/4.5.14 (Java/21.0.10)
+
+code=ATTACKER_CODE_HERE&grant_type=authorization_code
+&redirect_uri=http://46.101.162.187:8080/realms/test/broker/attacker-idp/endpoint
+&client_secret=sec&client_id=attacker-client
+```
+
+**Combined attack chain (Path B + C):**
+1. Attacker registers malicious IdP with `tokenUrl: http://internal-service:8080/token`
+2. Victim clicks Keycloak URL → redirected to `evil.com` (browser-side open redirect)
+3. Attacker's server returns fake code to Keycloak's broker endpoint
+4. Keycloak POSTs to `http://internal-service:8080/token` (server-side SSRF)
+5. Both phishing AND SSRF execute from a single victim click
 
 ---
 
