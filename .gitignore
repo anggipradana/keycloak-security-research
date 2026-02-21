@@ -1,0 +1,7 @@
+*.tar.gz
+keycloak-26.5.4/data/
+keycloak-26.5.4/
+*.log
+*.pid
+__pycache__/
+*.pyc

