@@ -39,7 +39,11 @@ Keycloak allows administrators to configure a per-client `webOrigins` allowlist 
 | `/realms/{r}/protocol/openid-connect/token` | POST | Cross-origin token theft |
 | `/realms/{r}/protocol/openid-connect/userinfo` | GET | Cross-origin PII read |
 | `/realms/{r}/account` | GET/POST/PUT | Cross-origin account data R/W |
-| `/admin/realms/{r}/users` | GET/POST | Cross-origin admin data access |
+| `/admin/realms/*` | GET/POST/PUT/DELETE | **Cross-origin full admin control** |
+| `/admin/realms/{r}/users` | GET/POST | Cross-origin user management |
+| `/admin/realms/{r}/clients` | GET/POST/PUT/DELETE | Cross-origin client management |
+
+The admin API CORS bypass is especially severe: **all admin REST API endpoints accept arbitrary cross-origin requests with credentials**. An admin who visits a malicious page while logged into the admin console can have their session hijacked to perform any admin action (create users, read all users, modify clients, revoke tokens, etc.) entirely cross-origin.
 
 The `token/introspect` endpoint correctly rejects unknown origins (not vulnerable).
 
@@ -178,12 +182,18 @@ Content-Type: application/json
 3. Script makes cross-origin token requests to any Keycloak realm using the client_id from app config
 4. Tokens exfiltrated silently
 
-**Scenario C: Admin data access via CORS (if admin has token in browser)**
-1. Admin is using the Keycloak admin console, token stored in memory
-2. Admin visits malicious page (social engineering)
-3. Malicious page fetches admin token via XSS (if admin console has any XSS), then:
-4. Makes cross-origin call to `/admin/realms/test/users` — CORS allows it
-5. Reads full user list, sensitive data
+**Scenario C: Full admin takeover via CORS (confirmed)**
+1. Admin logs into Keycloak admin console; browser holds admin token
+2. Admin visits malicious page (social engineering / watering hole attack)
+3. Malicious page makes cross-origin requests to `/admin/realms/*/` with admin's credentials:
+   - `GET /admin/realms/test/users` → reads all user data (email, names, IDs)
+   - `POST /admin/realms/test/users` → creates backdoor admin users
+   - `PUT /admin/realms/test/users/{id}/reset-password` → changes victim passwords
+   - `DELETE /admin/realms/test/clients/{clientId}` → destroys client registrations
+   - `GET /admin/realms/test/clients?clientId=*` → exfiltrates all client secrets
+4. All operations succeed because the admin API reflects `evil.com` with `credentials: true`
+
+This scenario does **not require XSS** — the CORS vulnerability directly allows the attack.
 
 ---
 
