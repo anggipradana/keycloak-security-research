@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Finding #5: DCR Trusted Hosts Bypass — Admin Setup Script
+DCR Trusted Hosts Bypass — Admin Setup Script
 One-time environment preparation (NOT part of the attack).
 
 Creates testuser + victim users and assigns create-client role to testuser.
 Run this on the Keycloak server or any machine with admin access.
 
 Usage:
-  python3 setup_f5_admin.py --host http://localhost:8080
-  python3 setup_f5_admin.py --host http://46.101.162.187:8080
+  python3 setup_dcr_admin.py --host http://localhost:8080
+  python3 setup_dcr_admin.py --host http://46.101.162.187:8080
 """
 
 import http.client
@@ -146,7 +146,7 @@ def create_user_if_missing(host, port, realm, token, username, password, email, 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Finding #5: Admin Setup — Create users and assign create-client role")
+        description="DCR Trusted Hosts Bypass — Admin Setup (create users and assign create-client role)")
     parser.add_argument("--host", default="http://localhost:8080",
                         help="Keycloak admin URL (default: http://localhost:8080)")
     parser.add_argument("--realm", default="test",
@@ -162,7 +162,7 @@ def main():
     port = parsed.port or 8080
     realm = args.realm
 
-    print(f"\n{BOLD}{CYAN}[Setup] Finding #5 — Admin Environment Preparation{RESET}")
+    print(f"\n{BOLD}{CYAN}[Setup] DCR Trusted Hosts Bypass — Admin Environment Preparation{RESET}")
     info(f"Keycloak: {host}:{port}")
     info(f"Realm: {realm}")
 
@@ -241,7 +241,7 @@ def main():
     print(f"    Victim user   : victim / Password123")
     print(f"    Realm         : {realm}")
     print(f"\n    Now run the attack from any machine:")
-    print(f"    python3 poc_f5_dcr_hijack.py --host {args.host} --attacker-host <YOUR_IP>")
+    print(f"    python3 poc_dcr_hijack.py --host {args.host} --attacker-host <YOUR_IP>")
     print()
     return 0
 

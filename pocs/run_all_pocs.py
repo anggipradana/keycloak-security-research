@@ -46,12 +46,12 @@ POCS = [
         "severity": "HIGH",
     },
     {
-        "file": "poc_f5_dcr_hijack.py",
+        "file": "poc_dcr_hijack.py",
         "finding": "Finding #5",
         "title": "DCR Trusted Hosts Bypass",
         "severity": "HIGH",
         "extra_args_template": True,  # needs attacker-host from parsed host
-        "setup_script": "setup_f5_admin.py",
+        "setup_script": "setup_dcr_admin.py",
     },
     {
         "file": "poc_f6_dcr_jwks_ssrf.py",

