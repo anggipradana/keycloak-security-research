@@ -109,8 +109,7 @@ Save the following as `setup_dcr_admin.py` and run it on the KC server (or any m
 python3 setup_dcr_admin.py --host http://localhost:8080 --realm test
 ```
 
-<details>
-<summary><strong>setup_dcr_admin.py — Full Source Code (click to expand)</strong></summary>
+**setup_dcr_admin.py — Full Source Code:**
 
 ```python
 #!/usr/bin/env python3
@@ -365,8 +364,6 @@ if __name__ == "__main__":
     sys.exit(main())
 ```
 
-</details>
-
 **Expected output:**
 ```
 [Setup] DCR Trusted Hosts Bypass — Admin Environment Preparation
@@ -454,8 +451,7 @@ python3 poc_dcr_hijack.py \
 - `--timeout` — Timeout waiting for victim in seconds (default: 300)
 - `--auto-victim` — Automatically simulate victim login (for testing/CI)
 
-<details>
-<summary><strong>poc_dcr_hijack.py — Full Source Code (click to expand)</strong></summary>
+**poc_dcr_hijack.py — Full Source Code:**
 
 ```python
 #!/usr/bin/env python3
@@ -1206,8 +1202,6 @@ def print_summary(results):
 if __name__ == "__main__":
     sys.exit(main())
 ```
-
-</details>
 
 ---
 
