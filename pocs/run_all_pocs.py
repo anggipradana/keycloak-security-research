@@ -9,6 +9,7 @@ import sys
 import os
 import time
 import argparse
+import urllib.parse
 
 # ANSI colors
 RED = "\033[91m"
@@ -49,7 +50,8 @@ POCS = [
         "finding": "Finding #5",
         "title": "DCR Trusted Hosts Bypass",
         "severity": "HIGH",
-        "extra_args": ["--auto-victim", "--timeout", "30"],
+        "extra_args_template": True,  # needs attacker-host from parsed host
+        "setup_script": "setup_f5_admin.py",
     },
     {
         "file": "poc_f6_dcr_jwks_ssrf.py",
@@ -118,7 +120,13 @@ def main():
                         help="Run only specific findings (e.g., --only 1 3 5)")
     parser.add_argument("--quiet", action="store_true",
                         help="Suppress individual PoC output (show summary only)")
+    parser.add_argument("--setup", action="store_true",
+                        help="Run admin setup scripts before PoCs that need them (e.g., F5)")
     args = parser.parse_args()
+
+    # Derive attacker-host from --host URL for F5 (when running on KC server)
+    parsed_host = urllib.parse.urlparse(args.host)
+    attacker_ip = parsed_host.hostname or "46.101.162.187"
 
     banner()
 
@@ -143,8 +151,22 @@ def main():
         print(f"{BOLD}{'━' * 70}{RESET}")
         print()
 
+        # Run setup script if --setup and poc has one
+        if args.setup and poc.get("setup_script"):
+            setup_script = os.path.join(poc_dir, poc["setup_script"])
+            if os.path.exists(setup_script):
+                print(f"  {CYAN}Running setup: {poc['setup_script']}...{RESET}")
+                subprocess.run(
+                    [sys.executable, setup_script, "--host", args.host],
+                    capture_output=True, text=True, timeout=30, cwd=poc_dir)
+
+        # Build extra_args — handle template for F5
+        extra_args = poc.get("extra_args")
+        if poc.get("extra_args_template"):
+            extra_args = ["--attacker-host", attacker_ip, "--auto-victim", "--timeout", "30"]
+
         exit_code, duration, output = run_poc(poc_dir, poc["file"], args.host, args.timeout,
-                                             extra_args=poc.get("extra_args"))
+                                             extra_args=extra_args)
 
         if not args.quiet:
             # Print output with slight indent
